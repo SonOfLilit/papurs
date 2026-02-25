@@ -1,0 +1,16 @@
+[package]
+name = "papurs"
+version = "0.1.0"
+edition = "2024"
+description = "Game Boy APU synth VST plugin - Rust port of PAPU"
+license = "LGPL-2.1-or-later"
+
+[lib]
+name = "papurs"
+path = "src/lib.rs"
+
+[dependencies]
+blip_buf = "0.1.6"
+
+[dev-dependencies]
+expect-test = "1.5.1"
