@@ -1,3 +1,5 @@
 /target
 testdata/*.wav
 testdata/*.raw
+tests/fixtures/*.raw
+tests/cpp_harness/harness
