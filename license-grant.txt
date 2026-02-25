@@ -1,0 +1,22 @@
+On Tue, Feb 24, 2026 at 1:05 AM Roland Rabien <***@gmail.com> wrote:
+Hi,
+
+You are more than welcome to use the code under the LGPL.
+
+R
+
+
+On February 23, 2026 at 2:17:07 PM, Aur Saraf (***@gmail.com) wrote:
+
+Hi,
+
+You wrote here [1] that you try to release your synths with the most permissive license possible given their dependencies.
+
+I see that PAPU is released as GPL and not LGPL. As far as I can tell, its audio engine only depends on Blargg's (wonderful!) stuff, which is all LGPL. Would you be open to relicensing your own code as LGPL?
+
+[..]
+
+Thanks (and thanks for your existing open source work!),
+Aur
+
+[1] https://www.kvraudio.com/forum/viewtopic.php?t=607257
