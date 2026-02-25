@@ -337,7 +337,8 @@ public:
     void getStateInformation(void*) {}
     void setStateInformation(const void*, int) {}
 
-    MidiLearn* midiLearn = nullptr;
+    MidiLearn dummyMidiLearn_;
+    MidiLearn* midiLearn = &dummyMidiLearn_;
 
 protected:
     std::map<juce::String, Parameter> params_;
