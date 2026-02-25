@@ -301,6 +301,158 @@ int main(int argc, char** argv) {
             }
         }
 
+    // ---- Phase 2-8: APU gold tests ----
+    // All use GoldHarness (full APU + Stereo_Buffer), render 2048 stereo pairs.
+
+    // apu_sq_duty{0-3}: Square 1, all duty cycles, MIDI note 60, volume=15, 2048 pairs
+    } else if (scenario == "apu_sq_duty0" || scenario == "apu_sq_duty1" ||
+               scenario == "apu_sq_duty2" || scenario == "apu_sq_duty3") {
+        int duty_idx = scenario.back() - '0'; // 0-3
+        GoldHarness h;
+        h.init();
+        h.write_reg(0xff24, 0x08 | 7);
+        h.write_reg(0xff25, 0x11);  // square1 left+right → center
+        uint16_t period = midi_to_gb_period(60);
+        h.write_reg(0xff10, 0x00);
+        h.write_reg(0xff11, duty_idx << 6); // duty cycle
+        h.write_reg(0xff12, 0x08 | (15 << 4)); // volume=15, env off, dir=up
+        h.write_reg(0xff13, period & 0xff);
+        h.write_reg(0xff14, 0x80 | ((period >> 8) & 0x07));
+        h.render(2048, stdout);
+
+    // apu_sq_freq_min: Square 1, minimum frequency (period=8192 → freq=0)
+    } else if (scenario == "apu_sq_freq_min") {
+        GoldHarness h;
+        h.init();
+        h.write_reg(0xff24, 0x08 | 7);
+        h.write_reg(0xff25, 0x11);
+        h.write_reg(0xff10, 0x00);
+        h.write_reg(0xff11, 2 << 6); // duty=2 (50%)
+        h.write_reg(0xff12, 0x08 | (15 << 4));
+        h.write_reg(0xff13, 0x00); // freq low = 0
+        h.write_reg(0xff14, 0x80); // trigger, freq high = 0 → period = 2048*4 = 8192
+        h.render(2048, stdout);
+
+    // apu_sq_freq_max: Square 1, high frequency (freq=2020 → period=112)
+    } else if (scenario == "apu_sq_freq_max") {
+        GoldHarness h;
+        h.init();
+        h.write_reg(0xff24, 0x08 | 7);
+        h.write_reg(0xff25, 0x11);
+        h.write_reg(0xff10, 0x00);
+        h.write_reg(0xff11, 2 << 6);
+        h.write_reg(0xff12, 0x08 | (15 << 4));
+        h.write_reg(0xff13, 2020 & 0xff);
+        h.write_reg(0xff14, 0x80 | ((2020 >> 8) & 0x07));
+        h.render(2048, stdout);
+
+    // apu_sq_vol0: Square 1, volume=0 → silence
+    } else if (scenario == "apu_sq_vol0") {
+        GoldHarness h;
+        h.init();
+        h.write_reg(0xff24, 0x08 | 7);
+        h.write_reg(0xff25, 0x11);
+        uint16_t period = midi_to_gb_period(60);
+        h.write_reg(0xff10, 0x00);
+        h.write_reg(0xff11, 2 << 6);
+        h.write_reg(0xff12, 0x00); // volume=0
+        h.write_reg(0xff13, period & 0xff);
+        h.write_reg(0xff14, 0x80 | ((period >> 8) & 0x07));
+        h.render(2048, stdout);
+
+    // apu_envelope: Square 1, attack=1 (vol ramps from 0 up), render 4096 pairs
+    } else if (scenario == "apu_envelope") {
+        GoldHarness h;
+        h.init();
+        h.write_reg(0xff24, 0x08 | 7);
+        h.write_reg(0xff25, 0x11);
+        uint16_t period = midi_to_gb_period(60);
+        h.write_reg(0xff10, 0x00);
+        h.write_reg(0xff11, 2 << 6);
+        // initial vol=0, dir=up, env_period=1
+        h.write_reg(0xff12, (0 << 4) | 0x08 | 1);
+        h.write_reg(0xff13, period & 0xff);
+        h.write_reg(0xff14, 0x80 | ((period >> 8) & 0x07));
+        h.render(4096, stdout);
+
+    // apu_sweep: Square 1, upward sweep, render 4096 pairs
+    } else if (scenario == "apu_sweep") {
+        GoldHarness h;
+        h.init();
+        h.write_reg(0xff24, 0x08 | 7);
+        h.write_reg(0xff25, 0x11);
+        // sweep_period=2, sweep_shift=1, dir=up
+        h.write_reg(0xff10, (2 << 4) | 0 | 1); // period=2, dir=0 (up), shift=1
+        h.write_reg(0xff11, 2 << 6);
+        h.write_reg(0xff12, 0x08 | (15 << 4));
+        uint16_t period = midi_to_gb_period(60);
+        h.write_reg(0xff13, period & 0xff);
+        h.write_reg(0xff14, 0x80 | ((period >> 8) & 0x07));
+        h.render(4096, stdout);
+
+    // apu_length: Square 1, length counter enabled, short length → silence
+    } else if (scenario == "apu_length") {
+        GoldHarness h;
+        h.init();
+        h.write_reg(0xff24, 0x08 | 7);
+        h.write_reg(0xff25, 0x11);
+        uint16_t period = midi_to_gb_period(60);
+        h.write_reg(0xff10, 0x00);
+        // length=2 (64-62=2 remaining), length_enabled=true (bit 6 of reg 4)
+        h.write_reg(0xff11, (2 << 6) | (64 - 2));
+        h.write_reg(0xff12, 0x08 | (15 << 4));
+        h.write_reg(0xff13, period & 0xff);
+        h.write_reg(0xff14, 0x80 | 0x40 | ((period >> 8) & 0x07)); // trigger+length_enabled
+        h.render(4096, stdout);
+
+    // apu_wave: Wave channel, preset 0, full volume, note 60
+    } else if (scenario == "apu_wave") {
+        GoldHarness h;
+        h.init();
+        h.write_reg(0xff24, 0x08 | 7);
+        h.write_reg(0xff25, 0x44); // wave channel → center
+        uint16_t period = midi_to_gb_period(60);
+        uint16_t wave_freq = (uint16_t)((4194304.0 / (440.0 * pow(2.0, (60 - 69) / 12.0)) - 65536.0) / -16.0 + 0.5);
+        // Wave freq = 2048 - (clock/(2*freq)) = 2048 - 4194304/(2*261.63) ≈ 2048-8018 ... use period calc
+        // Wave period = (2048-freq)*2, so freq = 2048 - period/2
+        // Let's just use midi_to_gb_period / 2 for wave
+        h.write_reg(0xff1C, 1 << 5); // volume = 1 (100%)
+        h.write_reg(0xff1D, period & 0xff);
+        h.write_reg(0xff1E, 0x80 | ((period >> 8) & 0x07));
+        h.render(2048, stdout);
+
+    // apu_noise: Noise channel, 15-bit LFSR, volume=15
+    } else if (scenario == "apu_noise") {
+        GoldHarness h;
+        h.init();
+        h.write_reg(0xff24, 0x08 | 7);
+        h.write_reg(0xff25, 0x88); // noise → center
+        h.write_reg(0xff21, 0x08 | (15 << 4)); // vol=15, dir=up, period=0
+        h.write_reg(0xff22, 0x00); // divisor=0 (8), shift=0, step=0 (15-bit)
+        h.write_reg(0xff23, 0x80); // trigger
+        h.render(2048, stdout);
+
+    // apu_stereo: Square1 → left, Square2 → right, both note 60, 2048 pairs
+    } else if (scenario == "apu_stereo") {
+        GoldHarness h;
+        h.init();
+        h.write_reg(0xff24, 0x08 | 7);
+        h.write_reg(0xff25, 0x21); // sq1=left(bit4), sq2=right(bit1)
+        uint16_t period = midi_to_gb_period(60);
+        // Square 1
+        h.write_reg(0xff10, 0x00);
+        h.write_reg(0xff11, 2 << 6);
+        h.write_reg(0xff12, 0x08 | (15 << 4));
+        h.write_reg(0xff13, period & 0xff);
+        h.write_reg(0xff14, 0x80 | ((period >> 8) & 0x07));
+        // Square 2
+        uint16_t period2 = midi_to_gb_period(64); // E4
+        h.write_reg(0xff16, 2 << 6);
+        h.write_reg(0xff17, 0x08 | (15 << 4));
+        h.write_reg(0xff18, period2 & 0xff);
+        h.write_reg(0xff19, 0x80 | ((period2 >> 8) & 0x07));
+        h.render(2048, stdout);
+
     } else {
         fprintf(stderr, "Unknown scenario: '%s'\n", scenario.c_str());
         return 1;

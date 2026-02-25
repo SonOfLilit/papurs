@@ -728,7 +728,7 @@ impl<'a> BlipReader<'a> {
 /// Stereo output buffer: center, left, right channels mixed as L=center+left,
 /// R=center+right.  Matches Stereo_Buffer in Multi_Buffer.h/.cpp.
 pub struct StereoBuffer {
-    bufs: [BlipBuffer; 3], // 0=center, 1=left, 2=right
+    pub bufs: [BlipBuffer; 3], // 0=center, 1=left, 2=right
     stereo_added: bool,
     was_stereo: bool,
 }
