@@ -33,6 +33,41 @@ pub const WAVE_SAMPLES: [[u8; 32]; 15] = [
 ];
 
 // ---------------------------------------------------------------------------
+// Sine LFO (mirrors gin::LFO with waveShape=sine, offset=0, fade=0, delay=0)
+// ---------------------------------------------------------------------------
+
+struct LfoState {
+    sample_rate: f64,
+    frequency:   f64,
+    depth:       f64,
+    phase:       f64,   // 0..1, wraps each cycle
+    output:      f64,   // last computed output
+}
+
+impl Default for LfoState {
+    fn default() -> Self {
+        LfoState { sample_rate: 44100.0, frequency: 5.0, depth: 0.0, phase: 0.0, output: 0.0 }
+    }
+}
+
+impl LfoState {
+    fn set_sample_rate(&mut self, sr: f64) { self.sample_rate = sr; }
+    fn set_params(&mut self, frequency: f64, depth: f64) {
+        self.frequency = frequency;
+        self.depth     = depth;
+    }
+    fn reset(&mut self) { self.phase = 0.0; self.output = 0.0; }
+    fn process(&mut self, n: i32) {
+        if n > 0 && self.sample_rate > 0.0 {
+            self.phase += self.frequency * n as f64 / self.sample_rate;
+            self.phase -= self.phase.floor();
+        }
+        self.output = self.depth * (std::f64::consts::TAU * self.phase).sin();
+    }
+    fn get_output(&self) -> f64 { self.output }
+}
+
+// ---------------------------------------------------------------------------
 // Params — per-block configuration (mirrors plugin parameters)
 // ---------------------------------------------------------------------------
 
@@ -63,10 +98,17 @@ pub struct Params {
     pub noise_or:      bool,
     pub noise_a:       i32,
     pub noise_r:       i32,
-    pub noise_shift:   i32,  // 0-13
-    pub noise_step:    i32,  // 0=15-bit, 1=7-bit LFSR
-    pub noise_ratio:   i32,  // 0-7
-    pub channel_split: bool,
+    pub noise_shift:      i32,  // 0-13
+    pub noise_step:       i32,  // 0=15-bit, 1=7-bit LFSR
+    pub noise_ratio:      i32,  // 0-7
+    pub channel_split:    bool,
+    // Vibrato LFO (per-channel). amt 0..100 → depth = 0.25 * amt / 100.
+    pub pulse1_vib_rate:  f32,  // Hz
+    pub pulse1_vib_amt:   f32,  // 0..100
+    pub pulse2_vib_rate:  f32,
+    pub pulse2_vib_amt:   f32,
+    pub wave_vib_rate:    f32,
+    pub wave_vib_amt:     f32,
 }
 
 impl Default for Params {
@@ -86,6 +128,9 @@ impl Default for Params {
             noise_a: 1, noise_r: 1,
             noise_shift: 0, noise_step: 0, noise_ratio: 0,
             channel_split: false,
+            pulse1_vib_rate: 5.0, pulse1_vib_amt: 0.0,
+            pulse2_vib_rate: 5.0, pulse2_vib_amt: 0.0,
+            wave_vib_rate:   5.0, wave_vib_amt:   0.0,
         }
     }
 }
@@ -124,6 +169,8 @@ pub struct PapuEngine {
     freq:          [f32; 3],      // last computed freq for ch1/2/3 (for release path)
     channel_split: bool,
     wave_index:    u8,
+    lfos:          [LfoState; 3], // vibrato LFO for ch1/2/3
+    vib_notes:     [i32; 3],      // last MIDI note used for vibrato freq calculation
 }
 
 /// Convert a MIDI note number (possibly fractional) to Hertz.
@@ -155,6 +202,8 @@ impl PapuEngine {
             freq:          [0.0; 3],
             channel_split: false,
             wave_index:    0,
+            lfos:          Default::default(),
+            vib_notes:     [0; 3],
         }
     }
 
@@ -165,6 +214,7 @@ impl PapuEngine {
         self.sbuf.bass_freq(461);
         self.sbuf.clock_rate(CLOCK_RATE);
         self.sbuf.set_sample_rate(sample_rate as i64);
+        for lfo in &mut self.lfos { lfo.set_sample_rate(sample_rate); }
 
         // Load wave preset 0
         self.write_reg(0xff1A, 0x00, true);
@@ -197,6 +247,7 @@ impl PapuEngine {
     fn run_oscs(&mut self, cur_notes: [i32; 4], triggers: [bool; 4], p: &Params) {
         // --- Ch1: Square 1 ---
         if cur_notes[0] != -1 {
+            self.vib_notes[0] = cur_notes[0];
             let sweep_abs = p.pulse1_sweep.unsigned_abs() as u8;
             let neg: u8   = if p.pulse1_sweep < 0 { 1 } else { 0 };
             self.write_reg(0xff10, (sweep_abs << 4) | (neg << 3) | p.pulse1_shift as u8, triggers[0]);
@@ -230,6 +281,7 @@ impl PapuEngine {
 
         // --- Ch2: Square 2 ---
         if cur_notes[1] != -1 {
+            self.vib_notes[1] = cur_notes[1];
             self.write_reg(0xff16, (p.pulse2_duty as u8) << 6, triggers[1]);
             let fine_f32 = p.pulse2_fine as f32 / 100.0_f32;
             let note_f64 = cur_notes[1] as f64 + self.pitch_bend + p.pulse2_tune as f64 + fine_f32 as f64;
@@ -260,6 +312,7 @@ impl PapuEngine {
 
         // --- Ch3: Wave ---
         if cur_notes[2] != -1 {
+            self.vib_notes[2] = cur_notes[2];
             self.apu.reset_stop_wave();
             let fine_f32 = p.wave_fine as f32 / 100.0_f32;
             let note_f64 = cur_notes[2] as f64 + self.pitch_bend + p.wave_tune as f64 + fine_f32 as f64;
@@ -295,10 +348,47 @@ impl PapuEngine {
         }
     }
 
+    /// Advance LFO and update freq registers. Mirrors C++ PAPUEngine::runVibrato.
+    fn run_vibrato(&mut self, todo: i32, p: &Params) {
+        for lfo in &mut self.lfos { lfo.process(todo); }
+
+        let fine1 = p.pulse1_fine as f32 / 100.0_f32;
+        let note1 = self.vib_notes[0] as f64 + self.pitch_bend
+            + p.pulse1_tune as f64 + fine1 as f64
+            + self.lfos[0].get_output() * 12.0;
+        let f1      = midi_hz(note1) as f32;
+        let period1 = sq_period(f1);
+        let trig1   = self.reg_cache.get(&0xff14u32).copied().unwrap_or(0) & 0x80 != 0;
+        self.write_reg(0xff13, (period1 & 0xff) as u8, false);
+        self.write_reg(0xff14, (if trig1 { 0x80u8 } else { 0 }) | ((period1 >> 8) as u8 & 0x07), false);
+
+        let fine2 = p.pulse2_fine as f32 / 100.0_f32;
+        let note2 = self.vib_notes[1] as f64 + self.pitch_bend
+            + p.pulse2_tune as f64 + fine2 as f64
+            + self.lfos[1].get_output() * 12.0;
+        let f2      = midi_hz(note2) as f32;
+        let period2 = sq_period(f2);
+        let trig2   = self.reg_cache.get(&0xff19u32).copied().unwrap_or(0) & 0x80 != 0;
+        self.write_reg(0xff18, (period2 & 0xff) as u8, false);
+        self.write_reg(0xff19, (if trig2 { 0x80u8 } else { 0 }) | ((period2 >> 8) as u8 & 0x07), false);
+
+        let fine3 = p.wave_fine as f32 / 100.0_f32;
+        let note3 = self.vib_notes[2] as f64 + self.pitch_bend
+            + p.wave_tune as f64 + fine3 as f64
+            + self.lfos[2].get_output() * 12.0;
+        let f3      = midi_hz(note3) as f32;
+        let period3 = wave_period(f3);
+        let trig3   = self.reg_cache.get(&0xff1eu32).copied().unwrap_or(0) & 0x80 != 0;
+        self.write_reg(0xff1D, (period3 & 0xff) as u8, false);
+        self.write_reg(0xff1E, (if trig3 { 0x80u8 } else { 0 }) | ((period3 >> 8) as u8 & 0x07), false);
+    }
+
     /// Render stereo pairs from `*done` up to `pos`, appending i16 pairs to `out`.
-    /// Matches C++ PAPUEngine::runUntil (without vibrato — Phase 10 adds that).
-    fn run_until(&mut self, done: &mut i32, out: &mut Vec<i16>, pos: i32) {
-        let mut todo = pos - *done;
+    /// Mirrors C++ PAPUEngine::runUntil: calls runVibrato first, then renders.
+    fn run_until(&mut self, done: &mut i32, out: &mut Vec<i16>, pos: i32, p: &Params) {
+        let todo = pos - *done;
+        self.run_vibrato(todo, p);
+        let mut todo = todo;
         while todo > 0 {
             let avail = self.sbuf.samples_avail() as i32;
             if avail > 0 {
@@ -332,6 +422,14 @@ impl PapuEngine {
     /// Process one audio block. Mirrors C++ PAPUEngine::processBlock.
     /// MIDI events must be sorted by `pos`. Output is appended as i16 stereo pairs.
     pub fn process_block(&mut self, block_size: i32, params: &Params, events: &[MidiEvent], out: &mut Vec<i16>) {
+        // Update LFO params (mirrors outer processBlock vib param update before engine call)
+        let d1 = 0.25_f32 * params.pulse1_vib_amt / 100.0_f32;
+        self.lfos[0].set_params(params.pulse1_vib_rate as f64, d1 as f64);
+        let d2 = 0.25_f32 * params.pulse2_vib_amt / 100.0_f32;
+        self.lfos[1].set_params(params.pulse2_vib_rate as f64, d2 as f64);
+        let d3 = 0.25_f32 * params.wave_vib_amt / 100.0_f32;
+        self.lfos[2].set_params(params.wave_vib_rate as f64, d3 as f64);
+
         // Global volume + panning (written every block via regCache, like C++)
         self.write_reg(0xff24, (0x08 | params.output) as u8, false);
         let pan: u8 =
@@ -356,10 +454,10 @@ impl PapuEngine {
 
         // Initial sustain run (uses last_notes, no triggers — mirrors C++)
         self.run_oscs(self.last_notes, [false; 4], params);
-        self.run_until(&mut done, out, 0);  // pos=0 → todo=0, no-op for samples
+        self.run_until(&mut done, out, 0, params);  // pos=0 → todo=0, no-op for samples
 
         'event: for event in events {
-            self.run_until(&mut done, out, event.pos);
+            self.run_until(&mut done, out, event.pos, params);
 
             let ch = event.channel;          // 1-based
             let mut update_bend = false;
@@ -399,7 +497,10 @@ impl PapuEngine {
                 || (0..4).any(|i| cur_notes[i] != self.last_notes[i]);
 
             if any_changed {
-                // Vibrato reset on new note (Phase 10 no-op: depth=0)
+                // Reset LFO on new note (not on pitch bend), mirrors C++ lines 380-382
+                if !update_bend && cur_notes[0] != -1 { self.lfos[0].reset(); }
+                if !update_bend && cur_notes[1] != -1 { self.lfos[1].reset(); }
+                if !update_bend && cur_notes[2] != -1 { self.lfos[2].reset(); }
                 let triggers = [
                     self.last_notes[0] != cur_notes[0],
                     self.last_notes[1] != cur_notes[1],
@@ -411,7 +512,7 @@ impl PapuEngine {
             }
         }
 
-        self.run_until(&mut done, out, block_size);
+        self.run_until(&mut done, out, block_size, params);
     }
 
     /// Change the loaded wave preset. Matches PAPUEngine::setWave().

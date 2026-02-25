@@ -660,6 +660,41 @@ fn test_9_4_engine_channel_split() {
     check_engine("engine_channel_split", bytes, expect!["raw:a15b71ee5e384fd1"]);
 }
 
+// ---------------------------------------------------------------------------
+// Phase 10 gold tests — Vibrato LFO
+// ---------------------------------------------------------------------------
+
+// ---- Test 10.1: engine_vibrato_sq1 ----
+// Pulse 1, note 60, vib rate=5Hz, amt=100 (depth=0.25), 2048 pairs.
+// LFO advances 2048 samples → phase ≈ 0.2322 → output ≈ 0.2484 → +2.98 semitones.
+
+#[test]
+fn test_10_1_engine_vibrato_sq1() {
+    let mut e = make_engine();
+    let mut p = Params::default();
+    p.pulse1_vib_rate = 5.0;
+    p.pulse1_vib_amt  = 100.0;
+    let events = vec![MidiEvent { pos: 0, channel: 1, kind: MidiKind::NoteOn(60) }];
+    let bytes = run_engine(&mut e, &p, 2048, &events);
+    check_engine("engine_vibrato_sq1", bytes, expect!["raw:a14331e86b6fe279"]);
+}
+
+// ---- Test 10.2: engine_vibrato_wave ----
+// Wave channel, note 60, vib rate=3Hz, amt=50 (depth=0.125), 2048 pairs.
+
+#[test]
+fn test_10_2_engine_vibrato_wave() {
+    let mut e = make_engine();
+    let mut p = Params::default();
+    p.pulse1_ol = false; p.pulse1_or = false;
+    p.wave_ol   = true;  p.wave_or   = true;
+    p.wave_vib_rate = 3.0;
+    p.wave_vib_amt  = 50.0;
+    let events = vec![MidiEvent { pos: 0, channel: 1, kind: MidiKind::NoteOn(60) }];
+    let bytes = run_engine(&mut e, &p, 2048, &events);
+    check_engine("engine_vibrato_wave", bytes, expect!["raw:1e06137e902c0e55"]);
+}
+
 // ---- Test 8.3: Stereo panning ----
 
 #[test]

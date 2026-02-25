@@ -18,6 +18,10 @@
 //   engine_mono_priority — note priority (LIFO): 60→64→release 64 → 60 resumes
 //   engine_pitch_bend    — note 60, pitch bend +1 semitone at 256, 1024 pairs
 //   engine_channel_split — channel_split: note 60 ch1 + note 64 ch2, 2048 pairs
+//
+// Phase 10 scenarios (Vibrato LFO):
+//   engine_vibrato_sq1   — note 60, pulse1 vib rate=5Hz amt=100, 2048 pairs
+//   engine_vibrato_wave  — note 60, wave channel vib rate=3Hz amt=50, 2048 pairs
 
 #include <cstdio>
 #include <cstdlib>
@@ -161,6 +165,27 @@ static double engine_midi_hz(double note) {
     return 440.0 * pow(2.0, (note - 69.0) / 12.0);
 }
 
+// Sine LFO — mirrors gin::LFO (waveShape=sine, offset=0, fade=0, delay=0)
+struct FakeLFO {
+    double sampleRate = 44100.0;
+    double frequency  = 5.0;
+    double depth      = 0.0;
+    double phase      = 0.0;  // 0..1
+    double output     = 0.0;
+
+    void setSampleRate(double sr) { sampleRate = sr; }
+    void setParams(double freq, double d) { frequency = freq; depth = d; }
+    void reset() { phase = 0.0; output = 0.0; }
+    void process(int n) {
+        if (n > 0 && sampleRate > 0.0) {
+            phase += frequency * n / sampleRate;
+            phase -= std::floor(phase);
+        }
+        output = depth * std::sin(2.0 * M_PI * phase);
+    }
+    double getOutput() const { return output; }
+};
+
 struct EngineParams {
     int  output       = 7;
     bool pulse1_ol    = true;  bool pulse1_or = true;
@@ -176,6 +201,10 @@ struct EngineParams {
     int  noise_A      = 1;     int noise_R = 1;
     int  noise_shift  = 0;     int noise_step = 0; int noise_ratio = 0;
     bool channel_split = false;
+    // Vibrato (amt 0..100 → depth = 0.25 * amt / 100)
+    float pulse1_vib_rate = 5.0f; float pulse1_vib_amt = 0.0f;
+    float pulse2_vib_rate = 5.0f; float pulse2_vib_amt = 0.0f;
+    float wave_vib_rate   = 5.0f; float wave_vib_amt   = 0.0f;
 };
 
 struct MidiEvt {
@@ -197,6 +226,9 @@ struct PapuEngineHarness {
     float freq[3] = {0.0f, 0.0f, 0.0f};
     bool channelSplit = false;
     uint8_t waveIndex = 0;
+    FakeLFO lfos[3];
+    int vibNotes[3] = {0, 0, 0};
+    const EngineParams* currentParams_ = nullptr;
 
     blip_time_t clock_() { return time += 4; }
 
@@ -215,6 +247,7 @@ struct PapuEngineHarness {
         buf.clock_rate(CLOCK_RATE);
         buf.set_sample_rate((long)sampleRate);
         apu.output(buf.center(), buf.left(), buf.right());
+        for (int i = 0; i < 3; i++) lfos[i].setSampleRate(sampleRate);
 
         writeReg(0xff1A, 0x00, true);
         for (int s = 0; s < 16; s++) {
@@ -230,10 +263,11 @@ struct PapuEngineHarness {
         return noteQueues[qi].empty() ? -1 : noteQueues[qi].back();
     }
 
-    // Mirror C++ runOscs exactly (vibrato depth=0 → vib output=0)
+    // Mirror C++ runOscs; tracks vibNotes for subsequent runVibrato calls
     void runOscs(int cn[4], bool trig[4], const EngineParams& p) {
         // Ch1: Square 1
         if (cn[0] != -1) {
+            vibNotes[0] = cn[0];
             int sweep_abs = abs(p.pulse1_sweep);
             bool neg = p.pulse1_sweep < 0;
             writeReg(0xff10, (sweep_abs << 4) | ((neg ? 1 : 0) << 3) | p.pulse1_shift, trig[0]);
@@ -260,6 +294,7 @@ struct PapuEngineHarness {
 
         // Ch2: Square 2
         if (cn[1] != -1) {
+            vibNotes[1] = cn[1];
             writeReg(0xff16, p.pulse2_duty << 6, trig[1]);
             freq[1] = (float)engine_midi_hz(cn[1] + pitchBend + p.pulse2_tune + p.pulse2_fine / 100.0f);
             uint16_t period2 = (uint16_t)(((4194304.0f / freq[1]) - 65536.0f) / -32.0f);
@@ -282,6 +317,7 @@ struct PapuEngineHarness {
 
         // Ch3: Wave
         if (cn[2] != -1) {
+            vibNotes[2] = cn[2];
             apu.resetStopWave();
             freq[2] = (float)engine_midi_hz(cn[2] + pitchBend + p.wave_tune + p.wave_fine / 100.0f);
             uint16_t period3 = (uint16_t)(-((65536.0f - 2048.0f * freq[2]) / freq[2]));
@@ -310,9 +346,40 @@ struct PapuEngineHarness {
         }
     }
 
-    // Mirror C++ runUntil: render stereo pairs from *done to pos
+    // Mirror C++ runVibrato: advance LFO and update freq registers
+    void runVibrato(int todo) {
+        const EngineParams& p = *currentParams_;
+        for (int i = 0; i < 3; i++) lfos[i].process(todo);
+
+        // Ch1: Square 1
+        bool trig1 = (regCache.count(0xff14) ? regCache.at(0xff14) : 0) & 0x80;
+        float f1 = (float)engine_midi_hz(vibNotes[0] + pitchBend + p.pulse1_tune
+                        + p.pulse1_fine / 100.0f + lfos[0].getOutput() * 12.0);
+        uint16_t period1 = (uint16_t)(((4194304.0f / f1) - 65536.0f) / -32.0f);
+        writeReg(0xff13, period1 & 0xff, false);
+        writeReg(0xff14, (trig1 ? 0x80 : 0x00) | ((period1 >> 8) & 0x07), false);
+
+        // Ch2: Square 2
+        bool trig2 = (regCache.count(0xff19) ? regCache.at(0xff19) : 0) & 0x80;
+        float f2 = (float)engine_midi_hz(vibNotes[1] + pitchBend + p.pulse2_tune
+                        + p.pulse2_fine / 100.0f + lfos[1].getOutput() * 12.0);
+        uint16_t period2 = (uint16_t)(((4194304.0f / f2) - 65536.0f) / -32.0f);
+        writeReg(0xff18, period2 & 0xff, false);
+        writeReg(0xff19, (trig2 ? 0x80 : 0x00) | ((period2 >> 8) & 0x07), false);
+
+        // Ch3: Wave
+        bool trig3 = (regCache.count(0xff1E) ? regCache.at(0xff1E) : 0) & 0x80;
+        float f3 = (float)engine_midi_hz(vibNotes[2] + pitchBend + p.wave_tune
+                        + p.wave_fine / 100.0f + lfos[2].getOutput() * 12.0);
+        uint16_t period3 = (uint16_t)(-((65536.0f - 2048.0f * f3) / f3));
+        writeReg(0xff1D, period3 & 0xff, false);
+        writeReg(0xff1E, (trig3 ? 0x80 : 0x00) | ((period3 >> 8) & 0x07), false);
+    }
+
+    // Mirror C++ runUntil: runVibrato then render stereo pairs from *done to pos
     void runUntil(int& done, std::vector<int16_t>& out, int pos) {
         int todo = pos - done;
+        runVibrato(todo);
         while (todo > 0) {
             long avail = buf.samples_avail();
             if (avail > 0) {
@@ -334,6 +401,15 @@ struct PapuEngineHarness {
     // Mirror C++ processBlock (single-voice path)
     void processBlock(int blockSize, const std::vector<MidiEvt>& events,
                       const EngineParams& p, std::vector<int16_t>& out) {
+        // Update LFO params (mirrors outer processBlock vib param update)
+        float d1 = 0.25f * p.pulse1_vib_amt / 100.0f;
+        lfos[0].setParams((double)p.pulse1_vib_rate, (double)d1);
+        float d2 = 0.25f * p.pulse2_vib_amt / 100.0f;
+        lfos[1].setParams((double)p.pulse2_vib_rate, (double)d2);
+        float d3 = 0.25f * p.wave_vib_amt / 100.0f;
+        lfos[2].setParams((double)p.wave_vib_rate, (double)d3);
+        currentParams_ = &p;
+
         int vol_reg = 0x08 | p.output;
         writeReg(0xff24, vol_reg, false);
 
@@ -390,6 +466,10 @@ struct PapuEngineHarness {
             for (int i = 0; i < 4; i++) anyChanged |= (newNotes[i] != lastNotes[i]);
 
             if (anyChanged) {
+                // Reset LFO on new note (not on pitch bend), mirrors C++ lines 380-382
+                if (!updateBend && newNotes[0] != -1) lfos[0].reset();
+                if (!updateBend && newNotes[1] != -1) lfos[1].reset();
+                if (!updateBend && newNotes[2] != -1) lfos[2].reset();
                 bool triggers[4] = {
                     lastNotes[0] != newNotes[0],
                     lastNotes[1] != newNotes[1],
@@ -789,6 +869,38 @@ int main(int argc, char** argv) {
         std::vector<MidiEvt> events = {
             {0, MidiEvt::NOTE_ON, 1, 60},
             {0, MidiEvt::NOTE_ON, 2, 64},
+        };
+        std::vector<int16_t> out;
+        h.processBlock(2048, events, p, out);
+        fwrite(out.data(), sizeof(int16_t), out.size(), stdout);
+
+    // ---- Phase 10: vibrato scenarios ----
+
+    // engine_vibrato_sq1: note 60, pulse1 vibrato rate=5Hz amt=100, 2048 pairs
+    } else if (scenario == "engine_vibrato_sq1") {
+        PapuEngineHarness h;
+        EngineParams p;
+        p.pulse1_vib_rate = 5.0f;
+        p.pulse1_vib_amt  = 100.0f;
+        h.init(p);
+        std::vector<MidiEvt> events = {
+            {0, MidiEvt::NOTE_ON, 1, 60},
+        };
+        std::vector<int16_t> out;
+        h.processBlock(2048, events, p, out);
+        fwrite(out.data(), sizeof(int16_t), out.size(), stdout);
+
+    // engine_vibrato_wave: note 60 on wave channel, vib rate=3Hz amt=50, 2048 pairs
+    } else if (scenario == "engine_vibrato_wave") {
+        PapuEngineHarness h;
+        EngineParams p;
+        p.pulse1_ol = false; p.pulse1_or = false;
+        p.wave_ol   = true;  p.wave_or   = true;
+        p.wave_vib_rate = 3.0f;
+        p.wave_vib_amt  = 50.0f;
+        h.init(p);
+        std::vector<MidiEvt> events = {
+            {0, MidiEvt::NOTE_ON, 1, 60},
         };
         std::vector<int16_t> out;
         h.processBlock(2048, events, p, out);
