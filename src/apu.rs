@@ -839,11 +839,9 @@ impl GbApu {
                 rescale_osc!(self.noise.env.osc);
 
                 if !any_enabled {
-                    // Route a DC offset through center (sq1 has outputs[3]=center)
-                    if self.square1.env.osc.output_select != OUT_NONE {
-                        let buf = pick_buf(OUT_CENTER, center, left, right).unwrap();
-                        self.square_synth.offset(time, (new_vol - old_vol) * 15 * 2, buf);
-                    }
+                    // C++: if (square1.outputs[3]) square_synth.offset(..., square1.outputs[3])
+                    // outputs[3] is always center (set by apu.output()), regardless of output_select.
+                    self.square_synth.offset(time, (new_vol - old_vol) * 15 * 2, center);
                 }
             }
         } else if addr == 0xff25 || addr == 0xff26 {

@@ -661,6 +661,103 @@ fn test_9_4_engine_channel_split() {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 11 gold tests — Full Parameter Mapping
+// ---------------------------------------------------------------------------
+
+// ---- Test 11.1: engine_full_pulse1 ----
+
+#[test]
+fn test_11_1_full_pulse1() {
+    let mut e = make_engine();
+    let mut p = Params::default();
+    p.pulse1_duty  = 2;
+    p.pulse1_a     = 3;
+    p.pulse1_r     = 5;
+    p.pulse1_tune  = 12;
+    p.pulse1_fine  = 50;
+    p.pulse1_sweep = -3;
+    p.pulse1_shift = 2;
+    let events = vec![
+        MidiEvent { pos: 0,    channel: 1, kind: MidiKind::NoteOn(60) },
+        MidiEvent { pos: 1024, channel: 1, kind: MidiKind::NoteOff(60) },
+    ];
+    let bytes = run_engine(&mut e, &p, 2048, &events);
+    check_engine("engine_full_pulse1", bytes, expect!["raw:af5b71625c4f6459"]);
+}
+
+// ---- Test 11.2: engine_full_pulse2 ----
+
+#[test]
+fn test_11_2_full_pulse2() {
+    let mut e = make_engine();
+    let mut p = Params::default();
+    p.pulse1_ol = false; p.pulse1_or = false;
+    p.pulse2_ol = true;  p.pulse2_or = true;
+    p.pulse2_duty = 1;
+    p.pulse2_a    = 2;
+    p.pulse2_r    = 4;
+    p.pulse2_tune = -7;
+    p.pulse2_fine = -25;
+    let events = vec![
+        MidiEvent { pos: 0,    channel: 1, kind: MidiKind::NoteOn(60) },
+        MidiEvent { pos: 1024, channel: 1, kind: MidiKind::NoteOff(60) },
+    ];
+    let bytes = run_engine(&mut e, &p, 2048, &events);
+    check_engine("engine_full_pulse2", bytes, expect!["raw:570a1de27d6e35cd"]);
+}
+
+// ---- Test 11.3: engine_wave_params ----
+
+#[test]
+fn test_11_3_wave_params() {
+    let mut e = make_engine();
+    let mut p = Params::default();
+    p.pulse1_ol  = false; p.pulse1_or = false;
+    p.wave_ol    = true;  p.wave_or   = true;
+    p.wave_tune  = -7;
+    p.wave_fine  = -25;
+    p.wave_index = 5;
+    let events = vec![MidiEvent { pos: 0, channel: 1, kind: MidiKind::NoteOn(60) }];
+    let bytes = run_engine(&mut e, &p, 2048, &events);
+    check_engine("engine_wave_params", bytes, expect!["raw:6a0df560742f38a5"]);
+}
+
+// ---- Test 11.4: engine_noise_params ----
+
+#[test]
+fn test_11_4_noise_params() {
+    let mut e = make_engine();
+    let mut p = Params::default();
+    p.pulse1_ol   = false; p.pulse1_or  = false;
+    p.noise_ol    = true;  p.noise_or   = true;
+    p.noise_a     = 0;
+    p.noise_r     = 4;
+    p.noise_shift = 8;
+    p.noise_step  = 1;
+    p.noise_ratio = 3;
+    let events = vec![
+        MidiEvent { pos: 0,    channel: 1, kind: MidiKind::NoteOn(60) },
+        MidiEvent { pos: 1024, channel: 1, kind: MidiKind::NoteOff(60) },
+    ];
+    let bytes = run_engine(&mut e, &p, 2048, &events);
+    check_engine("engine_noise_params", bytes, expect!["raw:8acc0ff3f7a73655"]);
+}
+
+// ---- Test 11.5: engine_global_params ----
+
+#[test]
+fn test_11_5_global_params() {
+    let mut e = make_engine();
+    let mut p = Params::default();
+    p.output = 5;
+    p.treble = -30.0;
+    p.bass   = 461;
+    let events = vec![MidiEvent { pos: 0, channel: 1, kind: MidiKind::NoteOn(60) }];
+    let bytes = run_engine(&mut e, &p, 2048, &events);
+    check_engine("engine_global_params", bytes, expect!["raw:c782702f89cce10d"]);
+}
+
+// ---------------------------------------------------------------------------
 // Phase 10 gold tests — Vibrato LFO
 // ---------------------------------------------------------------------------
 

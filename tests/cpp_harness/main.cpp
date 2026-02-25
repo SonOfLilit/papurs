@@ -22,6 +22,13 @@
 // Phase 10 scenarios (Vibrato LFO):
 //   engine_vibrato_sq1   — note 60, pulse1 vib rate=5Hz amt=100, 2048 pairs
 //   engine_vibrato_wave  — note 60, wave channel vib rate=3Hz amt=50, 2048 pairs
+//
+// Phase 11 scenarios (Full Parameter Mapping):
+//   engine_full_pulse1   — pulse1 duty=2 A=3 R=5 tune=+12 fine=+50 sweep=-3 shift=2
+//   engine_full_pulse2   — pulse2 duty=1 A=2 R=4 tune=-7 fine=-25
+//   engine_wave_params   — wave waveform=5 tune=-7 fine=-25
+//   engine_noise_params  — noise shift=8 step=1 ratio=3 A=0 R=4 (note-on then off)
+//   engine_global_params — output=5 treble=-30 bass=461
 
 #include <cstdio>
 #include <cstdlib>
@@ -205,6 +212,10 @@ struct EngineParams {
     float pulse1_vib_rate = 5.0f; float pulse1_vib_amt = 0.0f;
     float pulse2_vib_rate = 5.0f; float pulse2_vib_amt = 0.0f;
     float wave_vib_rate   = 5.0f; float wave_vib_amt   = 0.0f;
+    // Global EQ and wave preset
+    int   wave_index = 0;
+    float treble     = -20.0f;
+    int   bass       = 461;
 };
 
 struct MidiEvt {
@@ -229,6 +240,8 @@ struct PapuEngineHarness {
     FakeLFO lfos[3];
     int vibNotes[3] = {0, 0, 0};
     const EngineParams* currentParams_ = nullptr;
+    float currentTreble = -20.0f;
+    int   currentBass   = 461;
 
     blip_time_t clock_() { return time += 4; }
 
@@ -238,6 +251,18 @@ struct PapuEngineHarness {
             regCache[reg] = value;
             apu.write_register(clock_(), (gb_addr_t)reg, value);
         }
+    }
+
+    void setWave(int index) {
+        if (index == (int)waveIndex) return;
+        waveIndex = (uint8_t)index;
+        writeReg(0xff1A, 0x00, true);
+        for (int s = 0; s < 16; s++) {
+            uint8_t high = ENGINE_WAVE_SAMPLES[index][s * 2];
+            uint8_t low  = ENGINE_WAVE_SAMPLES[index][s * 2 + 1];
+            writeReg(0xff30 + s, (int)(low | (high << 4)), true);
+        }
+        writeReg(0xff1A, 0x80, true);
     }
 
     void init(const EngineParams& p, double sampleRate = 44100.0) {
@@ -401,6 +426,17 @@ struct PapuEngineHarness {
     // Mirror C++ processBlock (single-voice path)
     void processBlock(int blockSize, const std::vector<MidiEvt>& events,
                       const EngineParams& p, std::vector<int16_t>& out) {
+        // Apply global EQ and wave preset (mirrors outer processBlock param checks)
+        setWave(p.wave_index);
+        if (p.treble != currentTreble) {
+            currentTreble = p.treble;
+            apu.treble_eq(blip_eq_t((double)p.treble));
+        }
+        if (p.bass != currentBass) {
+            currentBass = p.bass;
+            buf.bass_freq(p.bass);
+        }
+
         // Update LFO params (mirrors outer processBlock vib param update)
         float d1 = 0.25f * p.pulse1_vib_amt / 100.0f;
         lfos[0].setParams((double)p.pulse1_vib_rate, (double)d1);
@@ -898,6 +934,100 @@ int main(int argc, char** argv) {
         p.wave_ol   = true;  p.wave_or   = true;
         p.wave_vib_rate = 3.0f;
         p.wave_vib_amt  = 50.0f;
+        h.init(p);
+        std::vector<MidiEvt> events = {
+            {0, MidiEvt::NOTE_ON, 1, 60},
+        };
+        std::vector<int16_t> out;
+        h.processBlock(2048, events, p, out);
+        fwrite(out.data(), sizeof(int16_t), out.size(), stdout);
+
+    // ---- Phase 11: full parameter mapping ----
+
+    // engine_full_pulse1: pulse1 duty=2 A=3 R=5 tune=+12 fine=+50 sweep=-3 shift=2
+    } else if (scenario == "engine_full_pulse1") {
+        PapuEngineHarness h;
+        EngineParams p;
+        p.pulse1_duty  = 2;
+        p.pulse1_A     = 3;
+        p.pulse1_R     = 5;
+        p.pulse1_tune  = 12;
+        p.pulse1_fine  = 50;
+        p.pulse1_sweep = -3;
+        p.pulse1_shift = 2;
+        h.init(p);
+        std::vector<MidiEvt> events = {
+            {0,    MidiEvt::NOTE_ON,  1, 60},
+            {1024, MidiEvt::NOTE_OFF, 1, 60},
+        };
+        std::vector<int16_t> out;
+        h.processBlock(2048, events, p, out);
+        fwrite(out.data(), sizeof(int16_t), out.size(), stdout);
+
+    // engine_full_pulse2: pulse2 duty=1 A=2 R=4 tune=-7 fine=-25
+    } else if (scenario == "engine_full_pulse2") {
+        PapuEngineHarness h;
+        EngineParams p;
+        p.pulse1_ol = false; p.pulse1_or = false;
+        p.pulse2_ol = true;  p.pulse2_or = true;
+        p.pulse2_duty = 1;
+        p.pulse2_A    = 2;
+        p.pulse2_R    = 4;
+        p.pulse2_tune = -7;
+        p.pulse2_fine = -25;
+        h.init(p);
+        std::vector<MidiEvt> events = {
+            {0,    MidiEvt::NOTE_ON,  1, 60},
+            {1024, MidiEvt::NOTE_OFF, 1, 60},
+        };
+        std::vector<int16_t> out;
+        h.processBlock(2048, events, p, out);
+        fwrite(out.data(), sizeof(int16_t), out.size(), stdout);
+
+    // engine_wave_params: wave waveform=5 tune=-7 fine=-25
+    } else if (scenario == "engine_wave_params") {
+        PapuEngineHarness h;
+        EngineParams p;
+        p.pulse1_ol = false; p.pulse1_or = false;
+        p.wave_ol   = true;  p.wave_or   = true;
+        p.wave_tune  = -7;
+        p.wave_fine  = -25;
+        p.wave_index = 5;
+        h.init(p);
+        std::vector<MidiEvt> events = {
+            {0, MidiEvt::NOTE_ON, 1, 60},
+        };
+        std::vector<int16_t> out;
+        h.processBlock(2048, events, p, out);
+        fwrite(out.data(), sizeof(int16_t), out.size(), stdout);
+
+    // engine_noise_params: noise shift=8 step=1 ratio=3 A=0 R=4
+    } else if (scenario == "engine_noise_params") {
+        PapuEngineHarness h;
+        EngineParams p;
+        p.pulse1_ol = false; p.pulse1_or = false;
+        p.noise_ol   = true;  p.noise_or  = true;
+        p.noise_A     = 0;
+        p.noise_R     = 4;
+        p.noise_shift = 8;
+        p.noise_step  = 1;
+        p.noise_ratio = 3;
+        h.init(p);
+        std::vector<MidiEvt> events = {
+            {0,    MidiEvt::NOTE_ON,  1, 60},
+            {1024, MidiEvt::NOTE_OFF, 1, 60},
+        };
+        std::vector<int16_t> out;
+        h.processBlock(2048, events, p, out);
+        fwrite(out.data(), sizeof(int16_t), out.size(), stdout);
+
+    // engine_global_params: output=5 treble=-30 bass=461
+    } else if (scenario == "engine_global_params") {
+        PapuEngineHarness h;
+        EngineParams p;
+        p.output = 5;
+        p.treble = -30.0f;
+        p.bass   = 461;
         h.init(p);
         std::vector<MidiEvt> events = {
             {0, MidiEvt::NOTE_ON, 1, 60},

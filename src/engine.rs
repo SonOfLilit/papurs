@@ -109,6 +109,10 @@ pub struct Params {
     pub pulse2_vib_amt:   f32,
     pub wave_vib_rate:    f32,
     pub wave_vib_amt:     f32,
+    // Global EQ and wave preset
+    pub wave_index:       u8,   // 0-14, wave RAM preset
+    pub treble:           f64,  // treble EQ in dB (e.g. -20.0)
+    pub bass:             i32,  // bass high-pass frequency in Hz (e.g. 461)
 }
 
 impl Default for Params {
@@ -131,6 +135,7 @@ impl Default for Params {
             pulse1_vib_rate: 5.0, pulse1_vib_amt: 0.0,
             pulse2_vib_rate: 5.0, pulse2_vib_amt: 0.0,
             wave_vib_rate:   5.0, wave_vib_amt:   0.0,
+            wave_index: 0, treble: -20.0, bass: 461,
         }
     }
 }
@@ -171,6 +176,8 @@ pub struct PapuEngine {
     wave_index:    u8,
     lfos:          [LfoState; 3], // vibrato LFO for ch1/2/3
     vib_notes:     [i32; 3],      // last MIDI note used for vibrato freq calculation
+    current_treble: f64,          // cached treble EQ to skip redundant rebuilds
+    current_bass:   i32,          // cached bass freq to skip redundant writes
 }
 
 /// Convert a MIDI note number (possibly fractional) to Hertz.
@@ -202,8 +209,10 @@ impl PapuEngine {
             freq:          [0.0; 3],
             channel_split: false,
             wave_index:    0,
-            lfos:          Default::default(),
-            vib_notes:     [0; 3],
+            lfos:           Default::default(),
+            vib_notes:      [0; 3],
+            current_treble: -20.0,
+            current_bass:   461,
         }
     }
 
@@ -422,6 +431,17 @@ impl PapuEngine {
     /// Process one audio block. Mirrors C++ PAPUEngine::processBlock.
     /// MIDI events must be sorted by `pos`. Output is appended as i16 stereo pairs.
     pub fn process_block(&mut self, block_size: i32, params: &Params, events: &[MidiEvent], out: &mut Vec<i16>) {
+        // Apply global EQ and wave preset (mirrors outer processBlock param checks)
+        self.set_wave(params.wave_index as usize);
+        if params.treble != self.current_treble {
+            self.current_treble = params.treble;
+            self.set_treble(params.treble);
+        }
+        if params.bass != self.current_bass {
+            self.current_bass = params.bass;
+            self.set_bass(params.bass);
+        }
+
         // Update LFO params (mirrors outer processBlock vib param update before engine call)
         let d1 = 0.25_f32 * params.pulse1_vib_amt / 100.0_f32;
         self.lfos[0].set_params(params.pulse1_vib_rate as f64, d1 as f64);
