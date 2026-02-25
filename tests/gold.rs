@@ -946,3 +946,143 @@ fn test_13_3_proc_odd_block() {
     let bytes = run_processor(&mut proc, &p, 333, &events);
     check_processor("proc_odd_block", bytes, expect!["raw:3dde712bf4472945"]);
 }
+
+// ---------------------------------------------------------------------------
+// Phase 14 gold tests — VST Plugin Shell
+// ---------------------------------------------------------------------------
+
+use papurs::plugin::{PapuPlugin, PapuPluginParams, PARAM_COUNT, PARAM_DEFS};
+use vst::plugin::{HostCallback, Plugin};
+
+// ---- Test 14.1: plugin_loads ----
+// Instantiate plugin, verify stereo out, MIDI in, all 39 parameters exposed.
+
+#[test]
+fn test_14_1_plugin_loads() {
+    let plugin = PapuPlugin::new(HostCallback::default());
+    let info   = plugin.get_info();
+
+    let result = format!(
+        "name={}\nvendor={}\ncategory={:?}\ninputs={}\noutputs={}\nparameters={}\n",
+        info.name, info.vendor, info.category,
+        info.inputs, info.outputs, info.parameters
+    );
+    expect![[r#"
+        name=PAPU
+        vendor=FigBug
+        category=Synth
+        inputs=0
+        outputs=2
+        parameters=39
+    "#]]
+    .assert_eq(&result);
+}
+
+// ---- Test 14.2: parameter_names ----
+// Verify all 39 parameter IDs and default normalized values.
+
+#[test]
+fn test_14_2_parameter_names() {
+    let params = PapuPluginParams::new();
+    let mut out = String::new();
+    for i in 0..PARAM_COUNT {
+        let def  = &PARAM_DEFS[i];
+        let norm = params.get_norm(i);
+        let act  = params.get_actual_float(i);
+        out += &format!(
+            "{:2}  {:12}  {:24}  [{:7.1}..{:6.1}]  default={:7.3}  norm={:.4}\n",
+            i, def.id, def.name, def.min, def.max, act, norm
+        );
+    }
+    expect![[r#"
+         0  OL1           Pulse 1 OL                [    0.0..   1.0]  default=  1.000  norm=1.0000
+         1  OR1           Pulse 1 OR                [    0.0..   1.0]  default=  1.000  norm=1.0000
+         2  duty1         Pulse 1 Duty              [    0.0..   3.0]  default=  0.000  norm=0.0000
+         3  A1            Pulse 1 A                 [    0.0..   7.0]  default=  1.000  norm=0.1429
+         4  R1            Pulse 1 R                 [    0.0..   7.0]  default=  1.000  norm=0.1429
+         5  tune1         Pulse 1 Tune              [  -48.0..  48.0]  default=  0.000  norm=0.5000
+         6  fine1         Pulse 1 Fine              [ -100.0.. 100.0]  default=  0.000  norm=0.5000
+         7  sweep1        Pulse 1 Sweep             [   -7.0..   7.0]  default=  0.000  norm=0.5000
+         8  shift1        Pulse 1 Shift             [    0.0..   7.0]  default=  0.000  norm=0.0000
+         9  rate1         Pulse 1 VibRate           [    0.0..  15.0]  default=  5.000  norm=0.3333
+        10  amt1          Pulse 1 VibAmt            [    0.0.. 100.0]  default=  0.000  norm=0.0000
+        11  OL2           Pulse 2 OL                [    0.0..   1.0]  default=  0.000  norm=0.0000
+        12  OR2           Pulse 2 OR                [    0.0..   1.0]  default=  0.000  norm=0.0000
+        13  duty2         Pulse 2 Duty              [    0.0..   3.0]  default=  0.000  norm=0.0000
+        14  A2            Pulse 2 A                 [    0.0..   7.0]  default=  1.000  norm=0.1429
+        15  R2            Pulse 2 R                 [    0.0..   7.0]  default=  1.000  norm=0.1429
+        16  tune2         Pulse 2 Tune              [  -48.0..  48.0]  default=  0.000  norm=0.5000
+        17  fine2         Pulse 2 Fine              [ -100.0.. 100.0]  default=  0.000  norm=0.5000
+        18  rate2         Pulse 2 VibRate           [    0.0..  15.0]  default=  5.000  norm=0.3333
+        19  amt2          Pulse 2 VibAmt            [    0.0.. 100.0]  default=  0.000  norm=0.0000
+        20  OLN           Noise OL                  [    0.0..   1.0]  default=  0.000  norm=0.0000
+        21  ORL           Noise OR                  [    0.0..   1.0]  default=  0.000  norm=0.0000
+        22  AN            Noise A                   [    0.0..   7.0]  default=  1.000  norm=0.1429
+        23  AR            Noise R                   [    0.0..   7.0]  default=  1.000  norm=0.1429
+        24  shiftN        Noise Shift               [    0.0..  13.0]  default=  0.000  norm=0.0000
+        25  stepN         Noise Step                [    0.0..   1.0]  default=  0.000  norm=0.0000
+        26  ratioN        Noise Ratio               [    0.0..   7.0]  default=  0.000  norm=0.0000
+        27  OLW           Wave OL                   [    0.0..   1.0]  default=  0.000  norm=0.0000
+        28  ORW           Wave OR                   [    0.0..   1.0]  default=  0.000  norm=0.0000
+        29  waveform      Waveform                  [    0.0..  14.0]  default=  0.000  norm=0.0000
+        30  tunewave      Wave Tune                 [  -48.0..  48.0]  default=  0.000  norm=0.5000
+        31  finewave      Wave Fine                 [ -100.0.. 100.0]  default=  0.000  norm=0.5000
+        32  ratewave      Wave VibRate              [    0.0..  15.0]  default=  5.000  norm=0.3333
+        33  amtwave       Wave VibAmt               [    0.0.. 100.0]  default=  0.000  norm=0.0000
+        34  channelsplit  Channel Split             [    0.0..   1.0]  default=  0.000  norm=0.0000
+        35  trebeq        Treble EQ                 [  -50.0..  50.0]  default=-30.000  norm=0.2000
+        36  bassf         Bass Frequency            [   15.0.. 600.0]  default=461.000  norm=0.7624
+        37  output        Output                    [    0.0..   7.0]  default=  7.000  norm=1.0000
+        38  param         Voices                    [    1.0..   8.0]  default=  1.000  norm=0.0000
+    "#]]
+    .assert_eq(&out);
+}
+
+// ---- Test 14.3: offline_render ----
+// Process buffer through VST interface; must match direct PapuProcessor output.
+
+#[test]
+fn test_14_3_offline_render() {
+    let block_size = 1024usize;
+
+    // --- direct engine render with plugin's default params ---
+    let plugin_params = PapuPluginParams::new().to_engine_params();
+    let events = vec![
+        MidiEvent { pos: 0, channel: 1, kind: MidiKind::NoteOn(60) },
+    ];
+    let mut direct_proc = make_processor(1);
+    let direct_bytes = f32_to_bytes(
+        &direct_proc.process_block(block_size as i32, &plugin_params, &events)
+    );
+
+    // --- plugin render ---
+    let mut plugin = PapuPlugin::new(HostCallback::default());
+    plugin.set_sample_rate(44_100.0);
+    plugin.handle_raw_midi([0x90, 60, 100], 0); // NoteOn(60) at pos=0
+
+    let mut left_buf  = vec![0.0f32; block_size];
+    let mut right_buf = vec![0.0f32; block_size];
+    let dummy_in = [0.0f32; 1];
+    let in_ptrs  = [dummy_in.as_ptr(), dummy_in.as_ptr()];
+    let mut out_ptrs = [left_buf.as_mut_ptr(), right_buf.as_mut_ptr()];
+
+    let mut audio_buf = unsafe {
+        vst::buffer::AudioBuffer::from_raw(
+            2, 2,
+            in_ptrs.as_ptr(),
+            out_ptrs.as_mut_ptr(),
+            block_size,
+        )
+    };
+    plugin.process(&mut audio_buf);
+    drop(audio_buf);
+
+    let mut plugin_bytes = f32_to_bytes(&left_buf);
+    plugin_bytes.extend_from_slice(&f32_to_bytes(&right_buf));
+
+    // Plugin output must exactly match direct engine output
+    assert_eq!(direct_bytes, plugin_bytes, "plugin output != direct engine output");
+
+    // Snapshot the output
+    testfile(&plugin_bytes, expect!["raw:b1470d4eca9c83f9"]);
+}
