@@ -10,7 +10,6 @@ name = "papurs"
 path = "src/lib.rs"
 
 [dependencies]
-blip_buf = "0.1.6"
 
 [dev-dependencies]
 expect-test = "1.5.1"
