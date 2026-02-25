@@ -12,6 +12,12 @@
 //   blip_bass_step   — DC step: bass_freq=16/461/600, each 512 mono samples
 //   blip_stereo      — center+left+right deltas, 512 stereo pairs
 //   blip_multiframe  — 100 end_frame(1024) cycles, all samples concatenated
+//
+// Phase 9 scenarios (PapuEngine: MIDI→APU):
+//   engine_note_on_off   — note 60 on at 0, off at 512, block=1024
+//   engine_mono_priority — note priority (LIFO): 60→64→release 64 → 60 resumes
+//   engine_pitch_bend    — note 60, pitch bend +1 semitone at 256, 1024 pairs
+//   engine_channel_split — channel_split: note 60 ch1 + note 64 ch2, 2048 pairs
 
 #include <cstdio>
 #include <cstdlib>
@@ -21,6 +27,8 @@
 #include <string>
 #include <cstdint>
 #include <initializer_list>
+#include <map>
+#include <vector>
 
 #include "Gb_Apu.h"
 #include "Multi_Buffer.h"
@@ -124,6 +132,278 @@ static uint16_t midi_to_gb_period(int note) {
     double freq = 440.0 * pow(2.0, (note - 69) / 12.0);
     return (uint16_t)(((4194304.0 / freq) - 65536.0) / -32.0);
 }
+
+// --------------------------------------------------------------------------
+// Phase 9: PapuEngine (standalone, no JUCE)
+// Mirrors PAPUEngine from PluginProcessor.cpp exactly.
+// --------------------------------------------------------------------------
+
+// Wave presets from PluginProcessor.h (Pokemon Red/Crystal source)
+static const uint8_t ENGINE_WAVE_SAMPLES[15][32] = {
+    { 0, 2, 4, 6, 8,10,12,14,15,15,15,14,14,13,13,12,12,11,10, 9, 8, 7, 6, 5, 4, 4, 3, 3, 2, 2, 1, 1},
+    { 0, 2, 4, 6, 8,10,12,14,14,15,15,15,15,14,14,14,13,13,12,11,10, 9, 8, 7, 6, 5, 4, 3, 2, 2, 1, 1},
+    { 1, 3, 6, 9,11,13,14,14,14,14,15,15,15,15,14,13,13,14,15,15,15,15,14,14,14,14,13,11, 9, 6, 3, 1},
+    { 0, 2, 4, 6, 8,10,12,13,14,15,15,14,13,14,15,15,14,14,13,12,11,10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0},
+    { 0, 1, 2, 3, 4, 5, 6, 7, 8,10,12,13,14,14,15, 7, 7,15,14,14,13,12,10, 8, 7, 6, 5, 4, 3, 2, 1, 0},
+    { 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 3, 3, 2, 2, 1, 1,15,15,14,14,12,12,10,10, 8, 8,10,10,12,12,14,14},
+    { 0, 2, 4, 6, 8,10,12,14,12,11,10, 9, 8, 7, 6, 5,15,15,15,14,14,13,13,12, 4, 4, 3, 3, 2, 2, 1, 1},
+    {12, 0,10, 9, 8, 7,15, 5,15,15,15,14,14,13,13,12, 4, 4, 3, 3, 2, 2,15, 1, 0, 2, 4, 6, 8,10,12,14},
+    { 4, 4, 3, 3, 2, 2, 1,15, 0, 0, 4, 6, 8,10,12,14,15, 8,15,14,14,13,13,12,12,11,10, 9, 8, 7, 6, 5},
+    { 1, 1, 0, 0, 0, 0, 0, 8, 0, 0, 1, 3, 5, 7, 9,10,11, 4,11,10,10, 9, 9, 8, 8, 7, 6, 5, 4, 3, 2, 1},
+    { 7, 9,11,13,15,15,15,15,15,15,15,15,15,13,11, 9, 7, 5, 3, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 3, 5},
+    { 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 7, 8, 8, 9, 9,10,10,11,11,12,12,13,13,14,14,15,15},
+    { 4, 6, 8,10,12,12,12,12,12,12,12,12,12,10, 8, 6, 4, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 2},
+    { 7,10,13,15,15,15,13,10, 7, 4, 1, 0, 0, 0, 1, 4, 7,10,13,15,15,15,13,10, 7, 4, 1, 0, 0, 0, 1, 4},
+    {14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+};
+
+static double engine_midi_hz(double note) {
+    return 440.0 * pow(2.0, (note - 69.0) / 12.0);
+}
+
+struct EngineParams {
+    int  output       = 7;
+    bool pulse1_ol    = true;  bool pulse1_or = true;
+    int  pulse1_duty  = 0;     int pulse1_A = 1; int pulse1_R = 1;
+    int  pulse1_tune  = 0;     int pulse1_fine = 0;
+    int  pulse1_sweep = 0;     int pulse1_shift = 0;
+    bool pulse2_ol    = false; bool pulse2_or = false;
+    int  pulse2_duty  = 0;     int pulse2_A = 1; int pulse2_R = 1;
+    int  pulse2_tune  = 0;     int pulse2_fine = 0;
+    bool wave_ol      = false; bool wave_or = false;
+    int  wave_tune    = 0;     int wave_fine = 0;
+    bool noise_ol     = false; bool noise_or = false;
+    int  noise_A      = 1;     int noise_R = 1;
+    int  noise_shift  = 0;     int noise_step = 0; int noise_ratio = 0;
+    bool channel_split = false;
+};
+
+struct MidiEvt {
+    int pos;
+    enum { NOTE_ON, NOTE_OFF, PITCH_BEND, ALL_NOTES_OFF } type;
+    int channel = 1;   // 1-based
+    int note    = 0;
+    int value   = 8192;
+};
+
+struct PapuEngineHarness {
+    Gb_Apu apu;
+    Stereo_Buffer buf;
+    blip_time_t time = 0;
+    std::map<int, int> regCache;
+    std::vector<int> noteQueues[4];
+    int lastNotes[4] = {-1, -1, -1, -1};
+    double pitchBend = 0.0;
+    float freq[3] = {0.0f, 0.0f, 0.0f};
+    bool channelSplit = false;
+    uint8_t waveIndex = 0;
+
+    blip_time_t clock_() { return time += 4; }
+
+    void writeReg(int reg, int value, bool force) {
+        auto itr = regCache.find(reg);
+        if (force || itr == regCache.end() || itr->second != value) {
+            regCache[reg] = value;
+            apu.write_register(clock_(), (gb_addr_t)reg, value);
+        }
+    }
+
+    void init(const EngineParams& p, double sampleRate = 44100.0) {
+        time = 0;
+        apu.treble_eq(blip_eq_t(-20.0));
+        buf.bass_freq(461);
+        buf.clock_rate(CLOCK_RATE);
+        buf.set_sample_rate((long)sampleRate);
+        apu.output(buf.center(), buf.left(), buf.right());
+
+        writeReg(0xff1A, 0x00, true);
+        for (int s = 0; s < 16; s++) {
+            uint8_t high = ENGINE_WAVE_SAMPLES[0][s * 2];
+            uint8_t low  = ENGINE_WAVE_SAMPLES[0][s * 2 + 1];
+            writeReg(0xff30 + s, (int)(low | (high << 4)), true);
+        }
+        writeReg(0xff1A, 0x80, true);
+        writeReg(0xff26, 0x8f, true);
+    }
+
+    int curNote(int qi) const {
+        return noteQueues[qi].empty() ? -1 : noteQueues[qi].back();
+    }
+
+    // Mirror C++ runOscs exactly (vibrato depth=0 → vib output=0)
+    void runOscs(int cn[4], bool trig[4], const EngineParams& p) {
+        // Ch1: Square 1
+        if (cn[0] != -1) {
+            int sweep_abs = abs(p.pulse1_sweep);
+            bool neg = p.pulse1_sweep < 0;
+            writeReg(0xff10, (sweep_abs << 4) | ((neg ? 1 : 0) << 3) | p.pulse1_shift, trig[0]);
+            writeReg(0xff11, p.pulse1_duty << 6, trig[0]);
+            // fine/100.0f: int/float = float; then double+float → double
+            freq[0] = (float)engine_midi_hz(cn[0] + pitchBend + p.pulse1_tune + p.pulse1_fine / 100.0f);
+            uint16_t period1 = (uint16_t)(((4194304.0f / freq[0]) - 65536.0f) / -32.0f);
+            writeReg(0xff13, period1 & 0xff, trig[0]);
+            int a1 = p.pulse1_A;
+            writeReg(0xff12, a1 ? (0x00 | (1 << 3) | a1) : 0xf0, trig[0]);
+            writeReg(0xff14, (trig[0] ? 0x80 : 0x00) | ((period1 >> 8) & 0x07), trig[0]);
+        } else if (trig[0]) {
+            int r1 = p.pulse1_R;
+            int a1 = p.pulse1_A;
+            if (a1 == 0 && r1 != 0) {
+                uint16_t period1 = (uint16_t)(((4194304.0f / freq[0]) - 65536.0f) / -32.0f);
+                writeReg(0xff13, period1 & 0xff, trig[0]);
+                writeReg(0xff12, r1 ? (0xf0 | r1) : 0, trig[0]);
+                writeReg(0xff14, (trig[0] ? 0x80 : 0x00) | ((period1 >> 8) & 0x07), trig[0]);
+            } else {
+                writeReg(0xff12, r1 ? (0xf0 | r1) : 0, trig[0]);
+            }
+        }
+
+        // Ch2: Square 2
+        if (cn[1] != -1) {
+            writeReg(0xff16, p.pulse2_duty << 6, trig[1]);
+            freq[1] = (float)engine_midi_hz(cn[1] + pitchBend + p.pulse2_tune + p.pulse2_fine / 100.0f);
+            uint16_t period2 = (uint16_t)(((4194304.0f / freq[1]) - 65536.0f) / -32.0f);
+            writeReg(0xff18, period2 & 0xff, trig[1]);
+            int a2 = p.pulse2_A;
+            writeReg(0xff17, a2 ? (0x00 | (1 << 3) | a2) : 0xf0, trig[1]);
+            writeReg(0xff19, (trig[1] ? 0x80 : 0x00) | ((period2 >> 8) & 0x07), trig[1]);
+        } else if (trig[1]) {
+            int r2 = p.pulse2_R;
+            int a2 = p.pulse2_A;
+            if (a2 == 0 && r2 != 0) {
+                uint16_t period2 = (uint16_t)(((4194304.0f / freq[1]) - 65536.0f) / -32.0f);
+                writeReg(0xff18, period2 & 0xff, trig[1]);
+                writeReg(0xff17, r2 ? (0xf0 | r2) : 0, trig[1]);
+                writeReg(0xff19, (trig[1] ? 0x80 : 0x00) | ((period2 >> 8) & 0x07), trig[1]);
+            } else {
+                writeReg(0xff17, r2 ? (0xf0 | r2) : 0, trig[1]);
+            }
+        }
+
+        // Ch3: Wave
+        if (cn[2] != -1) {
+            apu.resetStopWave();
+            freq[2] = (float)engine_midi_hz(cn[2] + pitchBend + p.wave_tune + p.wave_fine / 100.0f);
+            uint16_t period3 = (uint16_t)(-((65536.0f - 2048.0f * freq[2]) / freq[2]));
+            writeReg(0xff1D, period3 & 0xff, trig[2]);
+            writeReg(0xff1C, 0x20, trig[2]);
+            writeReg(0xff1E, (trig[2] ? 0x80 : 0x00) | ((period3 >> 8) & 0x07), trig[2]);
+        } else if (trig[2]) {
+            apu.stopWave();
+        }
+
+        // Ch4: Noise
+        if (cn[3] != -1) {
+            int aN = p.noise_A;
+            writeReg(0xff21, aN ? (0x00 | (1 << 3) | aN) : 0xf0, trig[3]);
+            writeReg(0xff22, (p.noise_shift << 4) | (p.noise_step << 3) | p.noise_ratio, trig[3]);
+            writeReg(0xff23, trig[3] ? 0x80 : 0x00, trig[3]);
+        } else if (trig[3]) {
+            int rN = p.noise_R;
+            int aN = p.noise_A;
+            if (aN == 0 && rN != 0) {
+                writeReg(0xff21, rN ? (0xf0 | rN) : 0, trig[3]);
+                writeReg(0xff23, 0x80, trig[3]);
+            } else {
+                writeReg(0xff21, rN ? (0xf0 | rN) : 0, trig[3]);
+            }
+        }
+    }
+
+    // Mirror C++ runUntil: render stereo pairs from *done to pos
+    void runUntil(int& done, std::vector<int16_t>& out, int pos) {
+        int todo = pos - done;
+        while (todo > 0) {
+            long avail = buf.samples_avail();
+            if (avail > 0) {
+                blip_sample_t tmp[1024];
+                int count = (int)std::min(std::min((long)todo, avail), (long)512);
+                count = (int)buf.read_samples(tmp, count);
+                for (int i = 0; i < count * 2; i++)
+                    out.push_back(tmp[i]);
+                done  += count;
+                todo  -= count;
+            } else {
+                time = 0;
+                bool stereo = apu.end_frame(1024);
+                buf.end_frame(1024, stereo);
+            }
+        }
+    }
+
+    // Mirror C++ processBlock (single-voice path)
+    void processBlock(int blockSize, const std::vector<MidiEvt>& events,
+                      const EngineParams& p, std::vector<int16_t>& out) {
+        int vol_reg = 0x08 | p.output;
+        writeReg(0xff24, vol_reg, false);
+
+        int pan_reg = (p.pulse1_ol ? 0x10 : 0) | (p.pulse1_or ? 0x01 : 0) |
+                      (p.pulse2_ol ? 0x20 : 0) | (p.pulse2_or ? 0x02 : 0) |
+                      (p.wave_ol   ? 0x40 : 0) | (p.wave_or   ? 0x04 : 0) |
+                      (p.noise_ol  ? 0x80 : 0) | (p.noise_or  ? 0x08 : 0);
+        writeReg(0xff25, pan_reg, false);
+
+        bool new_split = p.channel_split;
+        if (new_split != channelSplit) {
+            channelSplit = new_split;
+            for (auto& q : noteQueues) q.clear();
+        }
+
+        int done = 0;
+        bool trig0[4] = {false, false, false, false};
+        runOscs(lastNotes, trig0, p);
+        runUntil(done, out, 0);
+
+        for (auto& evt : events) {
+            runUntil(done, out, evt.pos);
+
+            bool updateBend = false;
+            if (evt.type == MidiEvt::NOTE_ON) {
+                if (evt.channel == 1 || !channelSplit) noteQueues[0].push_back(evt.note);
+                else if (evt.channel == 2) noteQueues[1].push_back(evt.note);
+                else if (evt.channel == 3) noteQueues[2].push_back(evt.note);
+                else if (evt.channel == 4) noteQueues[3].push_back(evt.note);
+            } else if (evt.type == MidiEvt::NOTE_OFF) {
+                int qi = (evt.channel == 1 || !channelSplit) ? 0 :
+                         (evt.channel == 2) ? 1 :
+                         (evt.channel == 3) ? 2 :
+                         (evt.channel == 4) ? 3 : -1;
+                if (qi >= 0) {
+                    auto& q = noteQueues[qi];
+                    auto it = std::find(q.begin(), q.end(), evt.note);
+                    if (it != q.end()) q.erase(it);
+                }
+            } else if (evt.type == MidiEvt::ALL_NOTES_OFF) {
+                for (auto& q : noteQueues) q.clear();
+            } else if (evt.type == MidiEvt::PITCH_BEND) {
+                updateBend = true;
+                pitchBend = (evt.value - 8192) / 8192.0f * 2;
+            }
+
+            int newNotes[4];
+            newNotes[0] = curNote(0);
+            newNotes[1] = channelSplit ? curNote(1) : newNotes[0];
+            newNotes[2] = channelSplit ? curNote(2) : newNotes[0];
+            newNotes[3] = channelSplit ? curNote(3) : newNotes[0];
+
+            bool anyChanged = updateBend;
+            for (int i = 0; i < 4; i++) anyChanged |= (newNotes[i] != lastNotes[i]);
+
+            if (anyChanged) {
+                bool triggers[4] = {
+                    lastNotes[0] != newNotes[0],
+                    lastNotes[1] != newNotes[1],
+                    lastNotes[2] != newNotes[2],
+                    lastNotes[3] != newNotes[3],
+                };
+                runOscs(newNotes, triggers, p);
+                for (int i = 0; i < 4; i++) lastNotes[i] = newNotes[i];
+            }
+        }
+
+        runUntil(done, out, blockSize);
+    }
+};
 
 // --------------------------------------------------------------------------
 // Phase 1: common settings matching PAPU defaults
@@ -452,6 +732,67 @@ int main(int argc, char** argv) {
         h.write_reg(0xff18, period2 & 0xff);
         h.write_reg(0xff19, 0x80 | ((period2 >> 8) & 0x07));
         h.render(2048, stdout);
+
+    // ---- Phase 9: engine scenarios ----
+
+    // engine_note_on_off: note 60 on at pos=0, off at pos=512, block=1024
+    } else if (scenario == "engine_note_on_off") {
+        PapuEngineHarness h;
+        EngineParams p;
+        h.init(p);
+        std::vector<MidiEvt> events = {
+            {0,   MidiEvt::NOTE_ON,  1, 60},
+            {512, MidiEvt::NOTE_OFF, 1, 60},
+        };
+        std::vector<int16_t> out;
+        h.processBlock(1024, events, p, out);
+        fwrite(out.data(), sizeof(int16_t), out.size(), stdout);
+
+    // engine_mono_priority: notes 60 and 64 on (LIFO), release 64 → 60 resumes
+    } else if (scenario == "engine_mono_priority") {
+        PapuEngineHarness h;
+        EngineParams p;
+        h.init(p);
+        std::vector<MidiEvt> events = {
+            {0,    MidiEvt::NOTE_ON,  1, 60},
+            {256,  MidiEvt::NOTE_ON,  1, 64},
+            {1024, MidiEvt::NOTE_OFF, 1, 64},
+        };
+        std::vector<int16_t> out;
+        // Two blocks of 1024 samples each
+        h.processBlock(1024, events, p, out);
+        std::vector<MidiEvt> events2;
+        h.processBlock(1024, events2, p, out);
+        fwrite(out.data(), sizeof(int16_t), out.size(), stdout);
+
+    // engine_pitch_bend: note 60, pitch bend +1 semitone at pos=256, block=1024
+    } else if (scenario == "engine_pitch_bend") {
+        PapuEngineHarness h;
+        EngineParams p;
+        h.init(p);
+        // pitch wheel 12288: (12288-8192)/8192.0f*2 = 1.0 semitone
+        std::vector<MidiEvt> events = {
+            {0,   MidiEvt::NOTE_ON,    1, 60, 0},
+            {256, MidiEvt::PITCH_BEND, 1, 0, 12288},
+        };
+        std::vector<int16_t> out;
+        h.processBlock(1024, events, p, out);
+        fwrite(out.data(), sizeof(int16_t), out.size(), stdout);
+
+    // engine_channel_split: channel_split=true, note 60 on ch1, note 64 on ch2
+    } else if (scenario == "engine_channel_split") {
+        PapuEngineHarness h;
+        EngineParams p;
+        p.channel_split = true;
+        p.pulse2_ol = true; p.pulse2_or = true;
+        h.init(p);
+        std::vector<MidiEvt> events = {
+            {0, MidiEvt::NOTE_ON, 1, 60},
+            {0, MidiEvt::NOTE_ON, 2, 64},
+        };
+        std::vector<int16_t> out;
+        h.processBlock(2048, events, p, out);
+        fwrite(out.data(), sizeof(int16_t), out.size(), stdout);
 
     } else {
         fprintf(stderr, "Unknown scenario: '%s'\n", scenario.c_str());

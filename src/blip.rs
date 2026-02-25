@@ -209,32 +209,6 @@ impl BlipBuffer {
         count
     }
 
-    /// Read up to `max_samples` samples with stereo interleaving.
-    /// Writes to `dest[0], dest[2], dest[4], ...` (caller fills the other channel).
-    pub fn read_samples_stereo(&mut self, dest: &mut [i16], max_samples: usize) -> usize {
-        let count = (self.samples_avail() as usize).min(max_samples);
-        if count == 0 {
-            return 0;
-        }
-        let bass_shift = self.bass_shift;
-        let mut accum = self.reader_accum;
-
-        for i in 0..count {
-            let s = accum >> (ACCUM_FRACT as i64);
-            accum -= accum >> bass_shift;
-            accum += ((self.buffer[i] as i64) - SAMPLE_OFFSET) << (ACCUM_FRACT as i64);
-            let idx = i * 2;
-            dest[idx] = if (s as i16) as i64 != s {
-                (0x7FFFi64 - (s >> 24)) as i16
-            } else {
-                s as i16
-            };
-        }
-
-        self.reader_accum = accum;
-        self.remove_samples(count);
-        count
-    }
 }
 
 impl Default for BlipBuffer {

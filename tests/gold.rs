@@ -570,6 +570,96 @@ fn test_7_1_noise() {
     check_apu("apu_noise", bytes, expect!["raw:8b8a9b7776166131"]);
 }
 
+// ---------------------------------------------------------------------------
+// Phase 9 gold tests — PapuEngine (MIDI → APU)
+// ---------------------------------------------------------------------------
+
+use papurs::engine::{MidiEvent, MidiKind, Params, PapuEngine};
+
+fn make_engine() -> PapuEngine {
+    let mut e = PapuEngine::new();
+    e.prepare(44_100.0);
+    e
+}
+
+fn run_engine(engine: &mut PapuEngine, params: &Params, block_size: i32, events: &[MidiEvent]) -> Vec<u8> {
+    let mut out = Vec::<i16>::new();
+    engine.process_block(block_size, params, events, &mut out);
+    i16_to_bytes(&out)
+}
+
+fn check_engine(scenario: &str, rust_bytes: Vec<u8>, expect: Expect) {
+    testfile(&rust_bytes, expect);
+    compare_with_cpp(scenario, rust_bytes);
+}
+
+// ---- Test 9.1: engine_note_on_off ----
+
+#[test]
+fn test_9_1_engine_note_on_off() {
+    let mut e = make_engine();
+    let p = Params::default();
+    let events = vec![
+        MidiEvent { pos: 0,   channel: 1, kind: MidiKind::NoteOn(60) },
+        MidiEvent { pos: 512, channel: 1, kind: MidiKind::NoteOff(60) },
+    ];
+    let bytes = run_engine(&mut e, &p, 1024, &events);
+    check_engine("engine_note_on_off", bytes, expect!["raw:ebdfa5713a6e3e69"]);
+}
+
+// ---- Test 9.2: engine_mono_priority ----
+// Notes 60 and 64: LIFO queue — 64 on top, release 64 → 60 resumes
+
+#[test]
+fn test_9_2_engine_mono_priority() {
+    let mut e = make_engine();
+    let p = Params::default();
+    // Block 1: note 60 on at 0, note 64 on at 256, note 64 off at 1024 (end)
+    let events1 = vec![
+        MidiEvent { pos: 0,    channel: 1, kind: MidiKind::NoteOn(60) },
+        MidiEvent { pos: 256,  channel: 1, kind: MidiKind::NoteOn(64) },
+        MidiEvent { pos: 1024, channel: 1, kind: MidiKind::NoteOff(64) },
+    ];
+    let mut out = Vec::<i16>::new();
+    e.process_block(1024, &p, &events1, &mut out);
+    // Block 2: no events, note 60 should resume
+    e.process_block(1024, &p, &[], &mut out);
+    let bytes = i16_to_bytes(&out);
+    check_engine("engine_mono_priority", bytes, expect!["raw:94156c1dbd39f33d"]);
+}
+
+// ---- Test 9.3: engine_pitch_bend ----
+
+#[test]
+fn test_9_3_engine_pitch_bend() {
+    let mut e = make_engine();
+    let p = Params::default();
+    // pitch wheel 12288 → (12288-8192)/8192.0f32*2 = 1.0 semitone
+    let events = vec![
+        MidiEvent { pos: 0,   channel: 1, kind: MidiKind::NoteOn(60) },
+        MidiEvent { pos: 256, channel: 1, kind: MidiKind::PitchBend(12288) },
+    ];
+    let bytes = run_engine(&mut e, &p, 1024, &events);
+    check_engine("engine_pitch_bend", bytes, expect!["raw:2518094b051f8815"]);
+}
+
+// ---- Test 9.4: engine_channel_split ----
+
+#[test]
+fn test_9_4_engine_channel_split() {
+    let mut e = make_engine();
+    let mut p = Params::default();
+    p.channel_split = true;
+    p.pulse2_ol = true;
+    p.pulse2_or = true;
+    let events = vec![
+        MidiEvent { pos: 0, channel: 1, kind: MidiKind::NoteOn(60) },
+        MidiEvent { pos: 0, channel: 2, kind: MidiKind::NoteOn(64) },
+    ];
+    let bytes = run_engine(&mut e, &p, 2048, &events);
+    check_engine("engine_channel_split", bytes, expect!["raw:a15b71ee5e384fd1"]);
+}
+
 // ---- Test 8.3: Stereo panning ----
 
 #[test]
