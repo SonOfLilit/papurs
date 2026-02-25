@@ -557,4 +557,229 @@ impl PapuEngine {
     pub fn set_bass(&mut self, bass: i32) {
         self.sbuf.bass_freq(bass);
     }
+
+    /// Return the last-played note for the given 1-based channel (-1 = silent).
+    /// Mirrors C++ PAPUEngine::getNote(channel).
+    pub fn get_note(&self, channel: u8) -> i32 {
+        if channel >= 1 && channel <= 4 {
+            self.last_notes[(channel - 1) as usize]
+        } else {
+            -1
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PapuProcessor — multi-voice wrapper (mirrors PAPUAudioProcessor).
+// ---------------------------------------------------------------------------
+
+pub struct PapuProcessor {
+    engines:    Vec<PapuEngine>,
+    next_voice: usize,
+}
+
+impl PapuProcessor {
+    pub fn new(voices: usize) -> Self {
+        PapuProcessor {
+            engines:    (0..voices).map(|_| PapuEngine::new()).collect(),
+            next_voice: 0,
+        }
+    }
+
+    pub fn prepare(&mut self, sample_rate: f64) {
+        for e in &mut self.engines { e.prepare(sample_rate); }
+    }
+
+    /// Process one block. Returns f32 interleaved as [left_0..left_{N-1}, right_0..right_{N-1}].
+    /// Mirrors PAPUAudioProcessor::processBlock (multi-voice path) + single-voice path.
+    pub fn process_block(&mut self, block_size: i32, params: &Params, events: &[MidiEvent]) -> Vec<f32> {
+        let n = self.engines.len();
+        let mut fb = vec![0.0f32; 2 * block_size as usize];
+
+        for i in 0..n {
+            Self::prepare_voice(&mut self.engines[i], params);
+        }
+
+        let mut done: i32 = 0;
+
+        for event in events {
+            Self::run_until_all(&mut self.engines, &mut done, &mut fb, event.pos, block_size, params);
+
+            match &event.kind {
+                MidiKind::NoteOn(_) => {
+                    let ch = if params.channel_split { event.channel } else { 1 };
+                    let voices = self.engines.len();
+                    let mut found_vi: Option<usize> = None;
+                    for i in 0..voices {
+                        let vi = (self.next_voice + i) % voices;
+                        if self.engines[vi].get_note(ch) == -1 {
+                            self.next_voice = (vi + 1) % voices;
+                            found_vi = Some(vi);
+                            break;
+                        }
+                    }
+                    if let Some(vi) = found_vi {
+                        Self::handle_message_for_voice(&mut self.engines[vi], event, params);
+                    }
+                }
+                MidiKind::NoteOff(note) => {
+                    let note_val = *note;
+                    let ch = if params.channel_split { event.channel } else { 1 };
+                    let voices = self.engines.len();
+                    let mut found_vi: Option<usize> = None;
+                    for vi in 0..voices {
+                        if self.engines[vi].get_note(ch) == note_val as i32 {
+                            found_vi = Some(vi);
+                            break;
+                        }
+                    }
+                    if let Some(vi) = found_vi {
+                        Self::handle_message_for_voice(&mut self.engines[vi], event, params);
+                    }
+                }
+                MidiKind::PitchBend(_) | MidiKind::AllNotesOff => {
+                    for i in 0..n {
+                        Self::handle_message_for_voice(&mut self.engines[i], event, params);
+                    }
+                }
+            }
+        }
+
+        Self::run_until_all(&mut self.engines, &mut done, &mut fb, block_size, block_size, params);
+        fb
+    }
+
+    /// Mirror C++ prepareBlock: apply params, write vol/pan, run sustained oscs.
+    fn prepare_voice(engine: &mut PapuEngine, params: &Params) {
+        engine.set_wave(params.wave_index as usize);
+        if params.treble != engine.current_treble {
+            engine.current_treble = params.treble;
+            engine.set_treble(params.treble);
+        }
+        if params.bass != engine.current_bass {
+            engine.current_bass = params.bass;
+            engine.set_bass(params.bass);
+        }
+
+        let d1 = 0.25_f32 * params.pulse1_vib_amt / 100.0_f32;
+        engine.lfos[0].set_params(params.pulse1_vib_rate as f64, d1 as f64);
+        let d2 = 0.25_f32 * params.pulse2_vib_amt / 100.0_f32;
+        engine.lfos[1].set_params(params.pulse2_vib_rate as f64, d2 as f64);
+        let d3 = 0.25_f32 * params.wave_vib_amt / 100.0_f32;
+        engine.lfos[2].set_params(params.wave_vib_rate as f64, d3 as f64);
+
+        engine.write_reg(0xff24, (0x08 | params.output) as u8, false);
+        let pan: u8 =
+            (if params.pulse1_ol { 0x10u8 } else { 0 }) |
+            (if params.pulse1_or { 0x01u8 } else { 0 }) |
+            (if params.pulse2_ol { 0x20u8 } else { 0 }) |
+            (if params.pulse2_or { 0x02u8 } else { 0 }) |
+            (if params.wave_ol   { 0x40u8 } else { 0 }) |
+            (if params.wave_or   { 0x04u8 } else { 0 }) |
+            (if params.noise_ol  { 0x80u8 } else { 0 }) |
+            (if params.noise_or  { 0x08u8 } else { 0 });
+        engine.write_reg(0xff25, pan, false);
+
+        let new_split = params.channel_split;
+        if new_split != engine.channel_split {
+            engine.channel_split = new_split;
+            for q in &mut engine.note_queues { q.clear(); }
+        }
+
+        let last_notes = engine.last_notes;
+        engine.run_oscs(last_notes, [false; 4], params);
+        // runUntil(done=0, pos=0) → todo=0 → just runVibrato(0)
+        engine.run_vibrato(0, params);
+    }
+
+    /// Mirror C++ handleMessage: update queues, re-run oscs if notes changed.
+    fn handle_message_for_voice(engine: &mut PapuEngine, event: &MidiEvent, params: &Params) {
+        let ch = event.channel;
+        let mut update_bend = false;
+
+        match &event.kind {
+            MidiKind::NoteOn(note) => {
+                if ch == 1 || !engine.channel_split {
+                    engine.note_queues[0].push(*note);
+                } else if ch == 2 { engine.note_queues[1].push(*note); }
+                else if ch == 3  { engine.note_queues[2].push(*note); }
+                else if ch == 4  { engine.note_queues[3].push(*note); }
+            }
+            MidiKind::NoteOff(note) => {
+                let qi: usize = if ch == 1 || !engine.channel_split { 0 }
+                                else if ch == 2 { 1 }
+                                else if ch == 3 { 2 }
+                                else if ch == 4 { 3 }
+                                else { return; };
+                if let Some(p) = engine.note_queues[qi].iter().position(|&n| n == *note) {
+                    engine.note_queues[qi].remove(p);
+                }
+            }
+            MidiKind::AllNotesOff => {
+                for q in &mut engine.note_queues { q.clear(); }
+            }
+            MidiKind::PitchBend(value) => {
+                update_bend = true;
+                let pb_f32 = (*value - 8192) as f32 / 8192.0_f32 * 2.0_f32;
+                engine.pitch_bend = pb_f32 as f64;
+            }
+        }
+
+        let cur_notes = engine.current_notes();
+        let any_changed = update_bend
+            || (0..4).any(|i| cur_notes[i] != engine.last_notes[i]);
+
+        if any_changed {
+            if !update_bend && cur_notes[0] != -1 { engine.lfos[0].reset(); }
+            if !update_bend && cur_notes[1] != -1 { engine.lfos[1].reset(); }
+            if !update_bend && cur_notes[2] != -1 { engine.lfos[2].reset(); }
+            let triggers = [
+                engine.last_notes[0] != cur_notes[0],
+                engine.last_notes[1] != cur_notes[1],
+                engine.last_notes[2] != cur_notes[2],
+                engine.last_notes[3] != cur_notes[3],
+            ];
+            engine.run_oscs(cur_notes, triggers, params);
+            engine.last_notes = cur_notes;
+        }
+    }
+
+    /// Mirror C++ PAPUEngine::runUntil: runVibrato then accumulate i16→f32 into fb.
+    /// fb layout: [left_0..left_{block_size-1}, right_0..right_{block_size-1}].
+    fn run_voice_until(engine: &mut PapuEngine, mut done_copy: i32, fb: &mut [f32], pos: i32, block_size: i32, params: &Params) {
+        let mut todo = pos - done_copy;
+        engine.run_vibrato(todo, params);
+        while todo > 0 {
+            let avail = engine.sbuf.samples_avail() as i32;
+            if avail > 0 {
+                let want = todo.min(512).min(avail) as usize;
+                let mut tmp = vec![0i16; want * 2];
+                let got = engine.sbuf.read_samples(&mut tmp, want);
+                for i in 0..got {
+                    fb[done_copy as usize + i]
+                        += tmp[i * 2]     as f32 / 32768.0_f32;
+                    fb[done_copy as usize + i + block_size as usize]
+                        += tmp[i * 2 + 1] as f32 / 32768.0_f32;
+                }
+                done_copy += got as i32;
+                todo      -= got as i32;
+            } else {
+                engine.time = 0;
+                let (center, left, right) = sbuf_split(&mut engine.sbuf);
+                let stereo = engine.apu.end_frame(FRAME_SIZE, center, left, right);
+                engine.sbuf.end_frame(FRAME_SIZE, stereo);
+            }
+        }
+    }
+
+    /// Mirror C++ PAPUAudioProcessor::runUntil: advance all voices in parallel.
+    fn run_until_all(engines: &mut [PapuEngine], done: &mut i32, fb: &mut Vec<f32>, pos: i32, block_size: i32, params: &Params) {
+        let clamped = pos.min(block_size);
+        let todo = (clamped - *done).max(0);
+        for engine in engines.iter_mut() {
+            let done_copy = *done;
+            Self::run_voice_until(engine, done_copy, fb, clamped, block_size, params);
+        }
+        *done += todo;
+    }
 }

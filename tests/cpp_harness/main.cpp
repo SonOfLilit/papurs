@@ -29,6 +29,17 @@
 //   engine_wave_params   — wave waveform=5 tune=-7 fine=-25
 //   engine_noise_params  — noise shift=8 step=1 ratio=3 A=0 R=4 (note-on then off)
 //   engine_global_params — output=5 treble=-30 bass=461
+//
+// Phase 12 scenarios (Polyphony — raw f32 output):
+//   proc_voices1         — 1 voice, note 60 on/off, block=1024
+//   proc_voices2_notes   — 2 voices, notes 60+64 on, block=2048
+//   proc_voices2_steal   — 2 voices, 3 notes on (3rd dropped), block=1024
+//   proc_voices2_rrobin  — 2 voices, round-robin assignment, block=2048
+//
+// Phase 13 scenarios (Mid-block events — raw f32 output):
+//   proc_mid_block_note  — 1 voice, note 60 on at pos=256, block=1024
+//   proc_multi_events    — 2 voices, events at 0/256/512/768, block=1024
+//   proc_odd_block       — 1 voice, note 60 on, block=333
 
 #include <cstdio>
 #include <cstdlib>
@@ -518,6 +529,208 @@ struct PapuEngineHarness {
         }
 
         runUntil(done, out, blockSize);
+    }
+};
+
+// --------------------------------------------------------------------------
+// Phase 12: PapuProcessor (multi-voice, float output — mirrors PAPUAudioProcessor)
+// --------------------------------------------------------------------------
+
+struct PapuProcessorHarness {
+    std::vector<PapuEngineHarness*> engines;
+    int nextVoice = 0;
+
+    ~PapuProcessorHarness() {
+        for (auto* e : engines) delete e;
+    }
+
+    void init(int voices, const EngineParams& p, double sampleRate = 44100.0) {
+        for (int i = 0; i < voices; i++) {
+            auto* e = new PapuEngineHarness();
+            e->init(p, sampleRate);
+            engines.push_back(e);
+        }
+    }
+
+    // Apply params to engine (wave, treble, bass, LFO, vol/pan, channel_split)
+    void applyParams(PapuEngineHarness* e, const EngineParams& p) {
+        e->setWave(p.wave_index);
+        if (p.treble != e->currentTreble) {
+            e->currentTreble = p.treble;
+            e->apu.treble_eq(blip_eq_t((double)p.treble));
+        }
+        if (p.bass != e->currentBass) {
+            e->currentBass = p.bass;
+            e->buf.bass_freq(p.bass);
+        }
+        float d1 = 0.25f * p.pulse1_vib_amt / 100.0f;
+        e->lfos[0].setParams((double)p.pulse1_vib_rate, (double)d1);
+        float d2 = 0.25f * p.pulse2_vib_amt / 100.0f;
+        e->lfos[1].setParams((double)p.pulse2_vib_rate, (double)d2);
+        float d3 = 0.25f * p.wave_vib_amt / 100.0f;
+        e->lfos[2].setParams((double)p.wave_vib_rate, (double)d3);
+        e->currentParams_ = &p;
+    }
+
+    // Mirror C++ prepareBlock: apply params, write vol/pan, run sustained oscs
+    void prepareVoice(PapuEngineHarness* e, const EngineParams& p) {
+        applyParams(e, p);
+
+        int vol_reg = 0x08 | p.output;
+        e->writeReg(0xff24, vol_reg, false);
+
+        int pan_reg = (p.pulse1_ol ? 0x10 : 0) | (p.pulse1_or ? 0x01 : 0) |
+                      (p.pulse2_ol ? 0x20 : 0) | (p.pulse2_or ? 0x02 : 0) |
+                      (p.wave_ol   ? 0x40 : 0) | (p.wave_or   ? 0x04 : 0) |
+                      (p.noise_ol  ? 0x80 : 0) | (p.noise_or  ? 0x08 : 0);
+        e->writeReg(0xff25, pan_reg, false);
+
+        if (p.channel_split != e->channelSplit) {
+            e->channelSplit = p.channel_split;
+            for (auto& q : e->noteQueues) q.clear();
+        }
+
+        bool trig0[4] = {false, false, false, false};
+        e->runOscs(e->lastNotes, trig0, p);
+        // runUntil(done=0, pos=0) → todo=0 → just runVibrato(0)
+        e->runVibrato(0);
+    }
+
+    // Mirror C++ handleMessage: update queues, re-run oscs if changed
+    void handleMessageForVoice(PapuEngineHarness* e, const MidiEvt& evt, const EngineParams& p) {
+        bool updateBend = false;
+        if (evt.type == MidiEvt::NOTE_ON) {
+            int ch = evt.channel;
+            if (ch == 1 || !e->channelSplit) e->noteQueues[0].push_back(evt.note);
+            else if (ch == 2) e->noteQueues[1].push_back(evt.note);
+            else if (ch == 3) e->noteQueues[2].push_back(evt.note);
+            else if (ch == 4) e->noteQueues[3].push_back(evt.note);
+        } else if (evt.type == MidiEvt::NOTE_OFF) {
+            int ch = evt.channel;
+            int qi = (ch == 1 || !e->channelSplit) ? 0 :
+                     (ch == 2) ? 1 : (ch == 3) ? 2 : (ch == 4) ? 3 : -1;
+            if (qi >= 0) {
+                auto& q = e->noteQueues[qi];
+                auto it = std::find(q.begin(), q.end(), evt.note);
+                if (it != q.end()) q.erase(it);
+            }
+        } else if (evt.type == MidiEvt::ALL_NOTES_OFF) {
+            for (auto& q : e->noteQueues) q.clear();
+        } else if (evt.type == MidiEvt::PITCH_BEND) {
+            updateBend = true;
+            e->pitchBend = (evt.value - 8192) / 8192.0f * 2;
+        }
+
+        int newNotes[4];
+        newNotes[0] = e->curNote(0);
+        newNotes[1] = e->channelSplit ? e->curNote(1) : newNotes[0];
+        newNotes[2] = e->channelSplit ? e->curNote(2) : newNotes[0];
+        newNotes[3] = e->channelSplit ? e->curNote(3) : newNotes[0];
+
+        bool anyChanged = updateBend;
+        for (int i = 0; i < 4; i++) anyChanged |= (newNotes[i] != e->lastNotes[i]);
+
+        if (anyChanged) {
+            if (!updateBend && newNotes[0] != -1) e->lfos[0].reset();
+            if (!updateBend && newNotes[1] != -1) e->lfos[1].reset();
+            if (!updateBend && newNotes[2] != -1) e->lfos[2].reset();
+            bool triggers[4] = {
+                e->lastNotes[0] != newNotes[0],
+                e->lastNotes[1] != newNotes[1],
+                e->lastNotes[2] != newNotes[2],
+                e->lastNotes[3] != newNotes[3],
+            };
+            e->runOscs(newNotes, triggers, p);
+            for (int i = 0; i < 4; i++) e->lastNotes[i] = newNotes[i];
+        }
+    }
+
+    // Mirror C++ PAPUEngine::runUntil but accumulate i16 into float buffer
+    // fb layout: [left_0..left_{N-1}, right_0..right_{N-1}]
+    void runVoiceUntil(PapuEngineHarness* e, int doneCopy, std::vector<float>& fb, int pos, int blockSize) {
+        int todo = pos - doneCopy;
+        e->runVibrato(todo);
+        while (todo > 0) {
+            long avail = e->buf.samples_avail();
+            if (avail > 0) {
+                blip_sample_t tmp[1024];
+                int count = (int)std::min(std::min((long)todo, avail), (long)512);
+                count = (int)e->buf.read_samples(tmp, count);
+                for (int i = 0; i < count; i++) {
+                    fb[doneCopy + i]             += tmp[i*2+0] / 32768.0f;
+                    fb[doneCopy + i + blockSize] += tmp[i*2+1] / 32768.0f;
+                }
+                doneCopy += count;
+                todo     -= count;
+            } else {
+                e->time = 0;
+                bool stereo = e->apu.end_frame(1024);
+                e->buf.end_frame(1024, stereo);
+            }
+        }
+    }
+
+    // Mirror C++ PAPUAudioProcessor::runUntil: advance all voices in parallel
+    void runUntilAll(int& done, std::vector<float>& fb, int pos, int blockSize) {
+        int clamped = std::min(pos, blockSize);
+        int todo    = clamped - done;
+        for (auto* e : engines) {
+            int doneCopy = done;
+            runVoiceUntil(e, doneCopy, fb, clamped, blockSize);
+        }
+        done += todo;
+    }
+
+    // getNote(channel): returns lastNotes[channel-1] (mirrors C++ PAPUEngine::getNote)
+    int getNote(PapuEngineHarness* e, int channel) {
+        return (channel >= 1 && channel <= 4) ? e->lastNotes[channel-1] : -1;
+    }
+
+    int findFreeVoiceIdx(int channel) {
+        int voices = (int)engines.size();
+        for (int i = 0; i < voices; i++) {
+            int vi = (nextVoice + i) % voices;
+            if (getNote(engines[vi], channel) == -1) {
+                nextVoice = (vi + 1) % voices;
+                return vi;
+            }
+        }
+        return -1;
+    }
+
+    int findVoiceForNoteIdx(int note, int channel) {
+        for (int i = 0; i < (int)engines.size(); i++) {
+            if (getNote(engines[i], channel) == note) return i;
+        }
+        return -1;
+    }
+
+    // Full block processing — mirrors PAPUAudioProcessor::processBlock multi-voice path
+    std::vector<float> processBlock(int blockSize, const std::vector<MidiEvt>& events, const EngineParams& p) {
+        std::vector<float> fb(2 * blockSize, 0.0f);
+
+        for (auto* e : engines) prepareVoice(e, p);
+
+        int done = 0;
+
+        for (auto& evt : events) {
+            runUntilAll(done, fb, evt.pos, blockSize);
+
+            if (evt.type == MidiEvt::NOTE_ON) {
+                int ch = p.channel_split ? evt.channel : 1;
+                int vi = findFreeVoiceIdx(ch);
+                if (vi >= 0) handleMessageForVoice(engines[vi], evt, p);
+            } else if (evt.type == MidiEvt::NOTE_OFF) {
+                int ch = p.channel_split ? evt.channel : 1;
+                int vi = findVoiceForNoteIdx(evt.note, ch);
+                if (vi >= 0) handleMessageForVoice(engines[vi], evt, p);
+            } else {
+                for (auto* e : engines) handleMessageForVoice(e, evt, p);
+            }
+        }
+
+        runUntilAll(done, fb, blockSize, blockSize);
+        return fb;
     }
 };
 
@@ -1035,6 +1248,102 @@ int main(int argc, char** argv) {
         std::vector<int16_t> out;
         h.processBlock(2048, events, p, out);
         fwrite(out.data(), sizeof(int16_t), out.size(), stdout);
+
+    // ---- Phase 12: proc_voices1 ----
+    // 1 voice, note 60 on at 0, off at 512, block=1024. Output: raw f32 bytes.
+    } else if (scenario == "proc_voices1") {
+        PapuProcessorHarness h;
+        EngineParams p;
+        h.init(1, p);
+        std::vector<MidiEvt> events = {
+            {0,   MidiEvt::NOTE_ON,  1, 60},
+            {512, MidiEvt::NOTE_OFF, 1, 60},
+        };
+        auto fb = h.processBlock(1024, events, p);
+        fwrite(fb.data(), sizeof(float), fb.size(), stdout);
+
+    // ---- Phase 12: proc_voices2_notes ----
+    // 2 voices, note 60 on voice 0 + note 64 on voice 1 at pos=0, block=2048.
+    } else if (scenario == "proc_voices2_notes") {
+        PapuProcessorHarness h;
+        EngineParams p;
+        h.init(2, p);
+        std::vector<MidiEvt> events = {
+            {0, MidiEvt::NOTE_ON, 1, 60},
+            {0, MidiEvt::NOTE_ON, 1, 64},
+        };
+        auto fb = h.processBlock(2048, events, p);
+        fwrite(fb.data(), sizeof(float), fb.size(), stdout);
+
+    // ---- Phase 12: proc_voices2_steal ----
+    // 2 voices, 3 note-ons: 60→v0, 64→v1, 67→dropped (no free voice), block=1024.
+    } else if (scenario == "proc_voices2_steal") {
+        PapuProcessorHarness h;
+        EngineParams p;
+        h.init(2, p);
+        std::vector<MidiEvt> events = {
+            {0, MidiEvt::NOTE_ON, 1, 60},
+            {0, MidiEvt::NOTE_ON, 1, 64},
+            {0, MidiEvt::NOTE_ON, 1, 67},
+        };
+        auto fb = h.processBlock(1024, events, p);
+        fwrite(fb.data(), sizeof(float), fb.size(), stdout);
+
+    // ---- Phase 12: proc_voices2_rrobin ----
+    // 2 voices round-robin: note 60 on (v0, next=1), off at 256,
+    // note 64 on at 512 (v1, next=0), note 67 on at 512 (v0, next=1), block=2048.
+    } else if (scenario == "proc_voices2_rrobin") {
+        PapuProcessorHarness h;
+        EngineParams p;
+        h.init(2, p);
+        std::vector<MidiEvt> events = {
+            {0,   MidiEvt::NOTE_ON,  1, 60},
+            {256, MidiEvt::NOTE_OFF, 1, 60},
+            {512, MidiEvt::NOTE_ON,  1, 64},
+            {512, MidiEvt::NOTE_ON,  1, 67},
+        };
+        auto fb = h.processBlock(2048, events, p);
+        fwrite(fb.data(), sizeof(float), fb.size(), stdout);
+
+    // ---- Phase 13: proc_mid_block_note ----
+    // 1 voice, note 60 on at pos=256 (mid-block), block=1024. First 256 samples silent.
+    } else if (scenario == "proc_mid_block_note") {
+        PapuProcessorHarness h;
+        EngineParams p;
+        h.init(1, p);
+        std::vector<MidiEvt> events = {
+            {256, MidiEvt::NOTE_ON, 1, 60},
+        };
+        auto fb = h.processBlock(1024, events, p);
+        fwrite(fb.data(), sizeof(float), fb.size(), stdout);
+
+    // ---- Phase 13: proc_multi_events ----
+    // 2 voices, note-on/off at positions 0, 256, 512, 768, block=1024.
+    } else if (scenario == "proc_multi_events") {
+        PapuProcessorHarness h;
+        EngineParams p;
+        h.init(2, p);
+        std::vector<MidiEvt> events = {
+            {0,   MidiEvt::NOTE_ON,  1, 60},
+            {0,   MidiEvt::NOTE_ON,  1, 64},
+            {256, MidiEvt::NOTE_OFF, 1, 60},
+            {512, MidiEvt::NOTE_ON,  1, 67},
+            {768, MidiEvt::NOTE_OFF, 1, 64},
+        };
+        auto fb = h.processBlock(1024, events, p);
+        fwrite(fb.data(), sizeof(float), fb.size(), stdout);
+
+    // ---- Phase 13: proc_odd_block ----
+    // 1 voice, note 60 on at 0, block=333 (non-power-of-2 size).
+    } else if (scenario == "proc_odd_block") {
+        PapuProcessorHarness h;
+        EngineParams p;
+        h.init(1, p);
+        std::vector<MidiEvt> events = {
+            {0, MidiEvt::NOTE_ON, 1, 60},
+        };
+        auto fb = h.processBlock(333, events, p);
+        fwrite(fb.data(), sizeof(float), fb.size(), stdout);
 
     } else {
         fprintf(stderr, "Unknown scenario: '%s'\n", scenario.c_str());

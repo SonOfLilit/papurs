@@ -574,7 +574,7 @@ fn test_7_1_noise() {
 // Phase 9 gold tests — PapuEngine (MIDI → APU)
 // ---------------------------------------------------------------------------
 
-use papurs::engine::{MidiEvent, MidiKind, Params, PapuEngine};
+use papurs::engine::{MidiEvent, MidiKind, Params, PapuEngine, PapuProcessor};
 
 fn make_engine() -> PapuEngine {
     let mut e = PapuEngine::new();
@@ -813,4 +813,136 @@ fn test_8_3_stereo() {
     h.write_reg(0xff19, 0x80 | ((period2 >> 8) & 0x07));
     let bytes = render_harness(&mut h, 2048);
     check_apu("apu_stereo", bytes, expect!["raw:919b49ff65f15ed8"]);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 12-13 gold tests — PapuProcessor (multi-voice)
+// ---------------------------------------------------------------------------
+
+fn f32_to_bytes(samples: &[f32]) -> Vec<u8> {
+    samples.iter().flat_map(|&s| s.to_le_bytes()).collect()
+}
+
+fn make_processor(voices: usize) -> PapuProcessor {
+    let mut p = PapuProcessor::new(voices);
+    p.prepare(44_100.0);
+    p
+}
+
+fn run_processor(proc: &mut PapuProcessor, params: &Params, block_size: i32, events: &[MidiEvent]) -> Vec<u8> {
+    f32_to_bytes(&proc.process_block(block_size, params, events))
+}
+
+fn check_processor(scenario: &str, rust_bytes: Vec<u8>, expect: Expect) {
+    testfile(&rust_bytes, expect);
+    compare_with_cpp(scenario, rust_bytes);
+}
+
+// ---- Test 12.1: proc_voices1 ----
+// 1 voice, note 60 on at 0, off at 512, block=1024. Output: f32 bytes.
+
+#[test]
+fn test_12_1_proc_voices1() {
+    let mut proc = make_processor(1);
+    let p = Params::default();
+    let events = vec![
+        MidiEvent { pos: 0,   channel: 1, kind: MidiKind::NoteOn(60) },
+        MidiEvent { pos: 512, channel: 1, kind: MidiKind::NoteOff(60) },
+    ];
+    let bytes = run_processor(&mut proc, &p, 1024, &events);
+    check_processor("proc_voices1", bytes, expect!["raw:2a187eae99640855"]);
+}
+
+// ---- Test 12.2: proc_voices2_notes ----
+// 2 voices, notes 60+64 on at 0, block=2048. Voices accumulate their output.
+
+#[test]
+fn test_12_2_proc_voices2_notes() {
+    let mut proc = make_processor(2);
+    let p = Params::default();
+    let events = vec![
+        MidiEvent { pos: 0, channel: 1, kind: MidiKind::NoteOn(60) },
+        MidiEvent { pos: 0, channel: 1, kind: MidiKind::NoteOn(64) },
+    ];
+    let bytes = run_processor(&mut proc, &p, 2048, &events);
+    check_processor("proc_voices2_notes", bytes, expect!["raw:b9d88d54a286ff95"]);
+}
+
+// ---- Test 12.3: proc_voices2_steal ----
+// 2 voices, 3 note-ons (3rd dropped), block=1024.
+
+#[test]
+fn test_12_3_proc_voices2_steal() {
+    let mut proc = make_processor(2);
+    let p = Params::default();
+    let events = vec![
+        MidiEvent { pos: 0, channel: 1, kind: MidiKind::NoteOn(60) },
+        MidiEvent { pos: 0, channel: 1, kind: MidiKind::NoteOn(64) },
+        MidiEvent { pos: 0, channel: 1, kind: MidiKind::NoteOn(67) },
+    ];
+    let bytes = run_processor(&mut proc, &p, 1024, &events);
+    check_processor("proc_voices2_steal", bytes, expect!["raw:f8a41238a3770059"]);
+}
+
+// ---- Test 12.4: proc_voices2_rrobin ----
+// 2 voices, round-robin: 60 on (v0), off at 256, 64 on at 512 (v1), 67 on at 512 (v0).
+
+#[test]
+fn test_12_4_proc_voices2_rrobin() {
+    let mut proc = make_processor(2);
+    let p = Params::default();
+    let events = vec![
+        MidiEvent { pos: 0,   channel: 1, kind: MidiKind::NoteOn(60) },
+        MidiEvent { pos: 256, channel: 1, kind: MidiKind::NoteOff(60) },
+        MidiEvent { pos: 512, channel: 1, kind: MidiKind::NoteOn(64) },
+        MidiEvent { pos: 512, channel: 1, kind: MidiKind::NoteOn(67) },
+    ];
+    let bytes = run_processor(&mut proc, &p, 2048, &events);
+    check_processor("proc_voices2_rrobin", bytes, expect!["raw:41e37ac295ac6805"]);
+}
+
+// ---- Test 13.1: proc_mid_block_note ----
+// 1 voice, note 60 on at pos=256. First 256 samples should be silent.
+
+#[test]
+fn test_13_1_proc_mid_block_note() {
+    let mut proc = make_processor(1);
+    let p = Params::default();
+    let events = vec![
+        MidiEvent { pos: 256, channel: 1, kind: MidiKind::NoteOn(60) },
+    ];
+    let bytes = run_processor(&mut proc, &p, 1024, &events);
+    check_processor("proc_mid_block_note", bytes, expect!["raw:52421f9df97f2349"]);
+}
+
+// ---- Test 13.2: proc_multi_events ----
+// 2 voices, multiple note-on/off events at different positions, block=1024.
+
+#[test]
+fn test_13_2_proc_multi_events() {
+    let mut proc = make_processor(2);
+    let p = Params::default();
+    let events = vec![
+        MidiEvent { pos: 0,   channel: 1, kind: MidiKind::NoteOn(60) },
+        MidiEvent { pos: 0,   channel: 1, kind: MidiKind::NoteOn(64) },
+        MidiEvent { pos: 256, channel: 1, kind: MidiKind::NoteOff(60) },
+        MidiEvent { pos: 512, channel: 1, kind: MidiKind::NoteOn(67) },
+        MidiEvent { pos: 768, channel: 1, kind: MidiKind::NoteOff(64) },
+    ];
+    let bytes = run_processor(&mut proc, &p, 1024, &events);
+    check_processor("proc_multi_events", bytes, expect!["raw:1fa229bbdd923945"]);
+}
+
+// ---- Test 13.3: proc_odd_block ----
+// 1 voice, note 60 on, block=333 (non-power-of-2).
+
+#[test]
+fn test_13_3_proc_odd_block() {
+    let mut proc = make_processor(1);
+    let p = Params::default();
+    let events = vec![
+        MidiEvent { pos: 0, channel: 1, kind: MidiKind::NoteOn(60) },
+    ];
+    let bytes = run_processor(&mut proc, &p, 333, &events);
+    check_processor("proc_odd_block", bytes, expect!["raw:3dde712bf4472945"]);
 }
