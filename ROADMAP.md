@@ -3,13 +3,34 @@
 The port proceeds in phases. Each phase adds functionality by writing gold tests first — tests that produce C++ reference output from the original PAPU, then verify the Rust port produces bit-exact matching output. The workflow: write the gold test, watch it fail, implement until it passes.
 
 All gold tests follow this pattern:
-1. Build a C++ test harness (once, in Phase 1) that drives the original PAPU engine headlessly
+1. Build a C++ test harness (once, in Phase 0) that drives the original PAPU engine headlessly
 2. For each scenario, generate reference output from C++ and check it into the repo
 3. The Rust test runs the same scenario and compares output sample-by-sample
 
 Everything is single-voice until Phase 12 (polyphony).
 
-## Phase 0: Port Blip_Buffer 0.3.4 to Rust (`src/blip.rs`)
+## Phase 0: Gold Test Scaffolding
+
+Build the C++ test harness that drives PAPU's audio engine headlessly (no JUCE, no UI) and produces reference output files. Build the Rust test harness that loads reference files and compares.
+
+**C++ harness** (in `tests/cpp_harness/`):
+- Compile `Gb_Apu`, `Gb_Oscs`, `Blip_Buffer`, `Multi_Buffer` standalone (no JUCE dependency)
+- Wrap `PAPUEngine`'s register-writing logic (or replicate it — it's thin)
+- Accept a scenario description: parameters, MIDI events with timestamps, block size, sample rate
+- Output raw interleaved i16 stereo samples to stdout/file
+
+**Rust harness** (in `tests/`):
+- For each gold test: load the C++ reference, run the same scenario through Rust, compare sample-by-sample
+- Use `expect_test` for snapshot-based assertions on short outputs
+- Use content-addressed files for longer audio (per testing philosophy)
+
+**Test 0.1: Silence**
+No notes, default parameters, render 512 samples at 44100 Hz. Both C++ and Rust output silence (all zeros or near-zero from high-pass settling). Bit-exact.
+
+**Test 0.2: Single square wave note — default parameters**
+Play MIDI note 60 (C4) on channel 1 with default parameters (Pulse 1: duty=0, A=1, OL=on, OR=on, output=7). Render 2048 samples. C++ reference → check in. Rust must match bit-exact.
+
+## Phase 1: Port Blip_Buffer 0.3.4 to Rust (`src/blip.rs`)
 
 Port Blargg's Blip_Buffer 0.3.4 + Blip_Synth + Stereo_Buffer to pure Rust, targeting bit-exact output with the C++ original. This replaces the `blip_buf` crate dependency.
 
@@ -29,44 +50,23 @@ Port Blargg's Blip_Buffer 0.3.4 + Blip_Synth + Stereo_Buffer to pure Rust, targe
 - Quality parameter controls impulse width: `width = quality * 4` (quality 1-4), `width = 24` (quality 5)
 - PAPU uses `Blip_Synth<blip_good_quality, 15*7*2>` for squares and `Blip_Synth<blip_med_quality, 15*7*2>` for wave/noise
 
-**Test 0.1: Single impulse — bit-exact with C++**
+**Test 1.1: Single impulse — bit-exact with C++**
 Feed a single delta of amplitude +1000 at clock time 0 into both C++ Blip_Buffer and Rust port, configured at clock_rate=4194304, sample_rate=44100, bass_freq=461, treble_eq=-20. Read all output samples. Verify bit-exact match.
 
-**Test 0.2: Square wave at 440 Hz — bit-exact**
+**Test 1.2: Square wave at 440 Hz — bit-exact**
 Alternate +volume/-volume deltas at period=(2048-1046)*4=4008 clocks (A4 ≈ 440 Hz). Render 1024 output samples with both. Verify bit-exact.
 
-**Test 0.3: Bass frequency filter**
+**Test 1.3: Bass frequency filter**
 Render a DC step with bass_freq=461. Verify the high-pass decay matches C++. Then test bass_freq=16 (default) and bass_freq=600. All bit-exact.
 
-**Test 0.4: Stereo mixing**
+**Test 1.4: Stereo mixing**
 Add deltas to center, left, and right buffers independently. Read interleaved stereo output. Verify L = center + left, R = center + right, bit-exact with C++ Stereo_Buffer.
 
-**Test 0.5: Fine mode vs normal mode**
+**Test 1.5: Fine mode vs normal mode**
 Test with `Blip_Synth<blip_good_quality, 210>` (15*7*2, fine mode since range > 512 is false but let's verify) and verify impulse table generation matches C++.
 
-**Test 0.6: Multiple end_frame cycles**
+**Test 1.6: Multiple end_frame cycles**
 Call end_frame(1024) repeatedly, reading samples between frames. Verify no timing drift vs C++ across 100 frames.
-
-## Phase 1: Gold Test Scaffolding
-
-Build the C++ test harness that drives PAPU's audio engine headlessly (no JUCE, no UI) and produces reference output files. Build the Rust test harness that loads reference files and compares.
-
-**C++ harness** (in `tests/cpp_harness/`):
-- Compile `Gb_Apu`, `Gb_Oscs`, `Blip_Buffer`, `Multi_Buffer` standalone (no JUCE dependency)
-- Wrap `PAPUEngine`'s register-writing logic (or replicate it — it's thin)
-- Accept a scenario description: parameters, MIDI events with timestamps, block size, sample rate
-- Output raw interleaved i16 stereo samples to stdout/file
-
-**Rust harness** (in `tests/`):
-- For each gold test: load the C++ reference, run the same scenario through Rust, compare sample-by-sample
-- Use `expect_test` for snapshot-based assertions on short outputs
-- Use content-addressed files for longer audio (per testing philosophy)
-
-**Test 1.1: Silence**
-No notes, default parameters, render 512 samples at 44100 Hz. Both C++ and Rust output silence (all zeros or near-zero from high-pass settling). Bit-exact.
-
-**Test 1.2: Single square wave note — default parameters**
-Play MIDI note 60 (C4) on channel 1 with default parameters (Pulse 1: duty=0, A=1, OL=on, OR=on, output=7). Render 2048 samples. C++ reference → check in. Rust must match bit-exact.
 
 ## Phase 2: Square Wave Oscillator (`src/apu.rs`)
 
