@@ -1,0 +1,3 @@
+[submodule "papu-original"]
+	path = papu-original
+	url = https://github.com/FigBug/PAPU.git
