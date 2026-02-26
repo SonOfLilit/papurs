@@ -187,13 +187,15 @@ fn midi_hz(note: f64) -> f64 {
 }
 
 /// Square/pulse frequency register period from freq (f32 arithmetic, matches C++).
+/// The `as i32 as u16` chain matches C++ `uint16_t(float)` which converts via
+/// int32 truncation then unsigned wrapping, rather than Rust's saturating `as u16`.
 fn sq_period(freq_f32: f32) -> u16 {
-    ((4_194_304.0_f32 / freq_f32 - 65_536.0_f32) / -32.0_f32) as u16
+    ((4_194_304.0_f32 / freq_f32 - 65_536.0_f32) / -32.0_f32) as i32 as u16
 }
 
 /// Wave channel frequency register period (f32 arithmetic, matches C++).
 fn wave_period(freq_f32: f32) -> u16 {
-    (-(65_536.0_f32 - 2048.0_f32 * freq_f32) / freq_f32) as u16
+    (-(65_536.0_f32 - 2048.0_f32 * freq_f32) / freq_f32) as i32 as u16
 }
 
 impl PapuEngine {
@@ -367,7 +369,9 @@ impl PapuEngine {
             + self.lfos[0].get_output() * 12.0;
         let f1      = midi_hz(note1) as f32;
         let period1 = sq_period(f1);
-        let trig1   = self.reg_cache.get(&0xff14u32).copied().unwrap_or(0) & 0x80 != 0;
+        // Use entry().or_insert(0) to match C++ std::map::operator[] which inserts
+        // default 0 when key is missing. This affects later writeReg skip logic.
+        let trig1   = *self.reg_cache.entry(0xff14u32).or_insert(0) & 0x80 != 0;
         self.write_reg(0xff13, (period1 & 0xff) as u8, false);
         self.write_reg(0xff14, (if trig1 { 0x80u8 } else { 0 }) | ((period1 >> 8) as u8 & 0x07), false);
 
@@ -377,7 +381,7 @@ impl PapuEngine {
             + self.lfos[1].get_output() * 12.0;
         let f2      = midi_hz(note2) as f32;
         let period2 = sq_period(f2);
-        let trig2   = self.reg_cache.get(&0xff19u32).copied().unwrap_or(0) & 0x80 != 0;
+        let trig2   = *self.reg_cache.entry(0xff19u32).or_insert(0) & 0x80 != 0;
         self.write_reg(0xff18, (period2 & 0xff) as u8, false);
         self.write_reg(0xff19, (if trig2 { 0x80u8 } else { 0 }) | ((period2 >> 8) as u8 & 0x07), false);
 
@@ -386,8 +390,9 @@ impl PapuEngine {
             + p.wave_tune as f64 + fine3 as f64
             + self.lfos[2].get_output() * 12.0;
         let f3      = midi_hz(note3) as f32;
-        let period3 = wave_period(f3);
-        let trig3   = self.reg_cache.get(&0xff1eu32).copied().unwrap_or(0) & 0x80 != 0;
+        // C++ runVibrato uses sq_period here (bug in original), not wave_period.
+        let period3 = sq_period(f3);
+        let trig3   = *self.reg_cache.entry(0xff1eu32).or_insert(0) & 0x80 != 0;
         self.write_reg(0xff1D, (period3 & 0xff) as u8, false);
         self.write_reg(0xff1E, (if trig3 { 0x80u8 } else { 0 }) | ((period3 >> 8) as u8 & 0x07), false);
     }
@@ -590,11 +595,29 @@ impl PapuProcessor {
         for e in &mut self.engines { e.prepare(sample_rate); }
     }
 
-    /// Process one block. Returns f32 interleaved as [left_0..left_{N-1}, right_0..right_{N-1}].
-    /// Mirrors PAPUAudioProcessor::processBlock (multi-voice path) + single-voice path.
+    /// Process one block. Returns f32 as [left_0..left_{N-1}, right_0..right_{N-1}].
+    /// For voices==1, delegates to PapuEngine::process_block (single-voice path with
+    /// note priority stacking), matching C++ `papus[0]->processBlock(buffer, midi)`.
+    /// For voices>1, uses multi-voice dispatch with findFreeVoice/findVoiceForNote.
     pub fn process_block(&mut self, block_size: i32, params: &Params, events: &[MidiEvent]) -> Vec<f32> {
         let n = self.engines.len();
-        let mut fb = vec![0.0f32; 2 * block_size as usize];
+        let bs = block_size as usize;
+
+        if n == 1 {
+            // Single-voice: delegate to PapuEngine::process_block (mirrors C++ voices==1 path)
+            let mut i16_out = Vec::new();
+            self.engines[0].process_block(block_size, params, events, &mut i16_out);
+            // Convert i16 stereo pairs [L0,R0,L1,R1,...] → f32 [L0..Ln-1, R0..Rn-1]
+            let mut fb = vec![0.0f32; 2 * bs];
+            let pairs = i16_out.len() / 2;
+            for i in 0..pairs {
+                fb[i]      = i16_out[i * 2]     as f32 / 32768.0_f32;
+                fb[i + bs] = i16_out[i * 2 + 1] as f32 / 32768.0_f32;
+            }
+            return fb;
+        }
+
+        let mut fb = vec![0.0f32; 2 * bs];
 
         for i in 0..n {
             Self::prepare_voice(&mut self.engines[i], params);

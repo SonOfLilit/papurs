@@ -709,8 +709,7 @@ fn test_9_1_engine_note_on_off() {
 
 #[test]
 fn test_9_2_engine_mono_priority() {
-    // TODO: Rust multi-block state differs from real PAPUAudioProcessor
-    check_processor_wip(ProcessorProgram {
+    check_processor(ProcessorProgram {
         voices: 1,
         params: Params::default(),
         blocks: vec![
@@ -721,7 +720,7 @@ fn test_9_2_engine_mono_priority() {
             ]},
             Block { size: 1024, events: vec![] },
         ],
-    }, expect!["raw:ce043c79ee60be89"]);
+    }, expect!["raw:daca9912693d8e19"]);
 }
 
 #[test]
@@ -760,15 +759,14 @@ fn test_10_1_engine_vibrato_sq1() {
 
 #[test]
 fn test_10_2_engine_vibrato_wave() {
-    // TODO: Rust vibrato wave LFO mismatch with real C++ gin::LFO
     let mut p = Params::default();
     p.pulse1_ol = false; p.pulse1_or = false;
     p.wave_ol = true; p.wave_or = true;
     p.wave_vib_rate = 3.0;
     p.wave_vib_amt = 50.0;
-    check_processor_wip(proc1(1, p, 2048, vec![
+    check_processor(proc1(1, p, 2048, vec![
         ev(0, 1, MidiKind::NoteOn(60)),
-    ]), expect!["raw:513f8364e4fef1ed"]);
+    ]), expect!["raw:a7b1a85f62a46655"]);
 }
 
 // ===========================================================================
@@ -809,21 +807,19 @@ fn test_11_2_full_pulse2() {
 
 #[test]
 fn test_11_3_wave_params() {
-    // TODO: C++ routes all notes to queue 0 in non-split mode; wave channel only gets notes in channel-split
     let mut p = Params::default();
     p.pulse1_ol = false; p.pulse1_or = false;
     p.wave_ol = true; p.wave_or = true;
     p.wave_tune = -7;
     p.wave_fine = -25;
     p.wave_index = 5;
-    check_processor_wip(proc1(1, p, 2048, vec![
+    check_processor(proc1(1, p, 2048, vec![
         ev(0, 1, MidiKind::NoteOn(60)),
-    ]), expect!["raw:a1e31434449df3a5"]);
+    ]), expect!["raw:5a17488ba591e669"]);
 }
 
 #[test]
 fn test_11_4_noise_params() {
-    // TODO: C++ routes all notes to queue 0 in non-split mode; noise channel only gets notes in channel-split
     let mut p = Params::default();
     p.pulse1_ol = false; p.pulse1_or = false;
     p.noise_ol = true; p.noise_or = true;
@@ -832,7 +828,7 @@ fn test_11_4_noise_params() {
     p.noise_shift = 8;
     p.noise_step = 1;
     p.noise_ratio = 3;
-    check_processor_wip(proc1(1, p, 2048, vec![
+    check_processor(proc1(1, p, 2048, vec![
         ev(0,    1, MidiKind::NoteOn(60)),
         ev(1024, 1, MidiKind::NoteOff(60)),
     ]), expect!["raw:28b748b754320f5d"]);
@@ -908,8 +904,7 @@ fn test_13_2_proc_multi_events() {
 
 #[test]
 fn test_13_3_proc_odd_block() {
-    // TODO: Rust odd block size (333) handling differs from C++ PAPUAudioProcessor
-    check_processor_wip(proc1(1, Params::default(), 333, vec![
+    check_processor(proc1(1, Params::default(), 333, vec![
         ev(0, 1, MidiKind::NoteOn(60)),
     ]), expect!["raw:3dde712bf4472945"]);
 }
