@@ -1,4 +1,23 @@
 // Game Boy APU emulation — port of Gb_Snd_Emu 0.1.4
+// Copyright (C) 2003-2005  Shay Green (original C++ Gb_Snd_Emu)
+// Copyright (C) 2026  Roland Rabien (PAPU integration)
+// Copyright (C) 2026  Aur Saraf (Rust port)
+//
+// This library is free software; you can redistribute it and/or
+// modify it under the terms of the GNU Lesser General Public
+// License as published by the Free Software Foundation; either
+// version 2.1 of the License, or (at your option) any later version.
+//
+// This library is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+// Lesser General Public License for more details.
+//
+// You should have received a copy of the GNU Lesser General Public
+// License along with this library; if not, write to the Free Software
+// Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301
+// USA
+//
 // Bit-exact with C++ original (Phases 2-8 of the port roadmap).
 
 use crate::blip::{BlipBuffer, BlipEq, BlipSynth};

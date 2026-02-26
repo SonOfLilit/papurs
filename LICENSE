@@ -1,3 +1,25 @@
+PAPURS — Game Boy APU Synth (Rust port of PAPU)
+
+Copyright (C) 2026  Roland Rabien — original C++ PAPU synth and Gin framework
+Copyright (C) 2003-2005  Shay Green — Blip_Buffer 0.3.4 and Gb_Snd_Emu 0.1.4
+Copyright (C) 2026  Aur Saraf — Rust port
+
+This project is a Rust port of the PAPU Game Boy sound chip synth by
+Roland Rabien (https://github.com/FigBug/PAPU). The original C++ code is
+copyright Roland Rabien and is used here under the LGPL with his explicit
+permission (see license-grant.txt).
+
+The APU emulation is based on Shay Green's (Blargg's) Gb_Snd_Emu 0.1.4
+and Blip_Buffer 0.3.4.
+
+The vibrato LFO is based on gin::LFO from Roland Rabien's Gin framework,
+which is licensed under the BSD 3-Clause License. See LICENSES/Gin-LICENSE
+for the full Gin license text.
+
+The PAPURS library as a whole is licensed under LGPLv2.1:
+
+--------------------------------------------------------------------------------
+
                   GNU LESSER GENERAL PUBLIC LICENSE
                        Version 2.1, February 1999
 
