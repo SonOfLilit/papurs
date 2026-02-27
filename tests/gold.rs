@@ -913,9 +913,12 @@ fn test_13_3_proc_odd_block() {
 // Phase 14 — VST Plugin Shell (Rust-only, no C++ comparison)
 // ===========================================================================
 
+#[cfg(feature = "vst-plugin")]
 use papurs::plugin::{PapuPlugin, PapuPluginParams, PARAM_COUNT, PARAM_DEFS};
+#[cfg(feature = "vst-plugin")]
 use vst::plugin::{HostCallback, Plugin};
 
+#[cfg(feature = "vst-plugin")]
 #[test]
 fn test_14_1_plugin_loads() {
     let plugin = PapuPlugin::new(HostCallback::default());
@@ -935,6 +938,7 @@ fn test_14_1_plugin_loads() {
     .assert_eq(&result);
 }
 
+#[cfg(feature = "vst-plugin")]
 #[test]
 fn test_14_2_parameter_names() {
     let params = PapuPluginParams::new();
@@ -992,6 +996,7 @@ fn test_14_2_parameter_names() {
     .assert_eq(&out);
 }
 
+#[cfg(feature = "vst-plugin")]
 #[test]
 fn test_14_3_offline_render() {
     let block_size = 1024usize;

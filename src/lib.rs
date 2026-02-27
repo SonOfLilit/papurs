@@ -20,4 +20,5 @@
 pub mod blip;
 pub mod apu;
 pub mod engine;
+#[cfg(feature = "vst-plugin")]
 pub mod plugin;
