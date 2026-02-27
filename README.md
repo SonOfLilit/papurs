@@ -3,3 +3,5 @@ A port of [SocaLabs PAPU VST](https://github.com/FigBug/PAPU/tree/master)'s audi
 Written 100% by Claude Code (planning by Opus 4.6, implementation by Sonnet 4.6, design review and test review by Aur Saraf).
 
 The code was written entirely by Roland Rabien (in C++) and is (c) to him except for the test utilities.
+
+To run the tests, first `git submodule update --init papu-original`
