@@ -1415,3 +1415,64 @@ fn test_15_23_retrigger_same_note() {
         ev(1024, 1, MidiKind::NoteOn(60)),   // retrigger again
     ]), expect!["raw:e314c057b7f511c9"]);
 }
+
+// ===========================================================================
+// Phase 16 — Rust-only regression tests (not comparable against C++: the
+// gold protocol has fixed params per program, so mid-run param changes
+// can't be expressed; these document deliberate divergences from C++)
+// ===========================================================================
+
+// --- 16.1: fix_silent_retrigger — param change while silent stays silent ---
+//
+// runVibrato reconstructs the freq MSB register (NRx4) each block and ORs
+// back the trigger bit cached from the last note write. While a channel is
+// silent that stale bit re-fires the release decay the moment
+// tune/fine/bend change the period. A percussive patch (A=0, R>0 → NoteOff
+// plays the decay) audibly re-fires when the user moves the tune knob with
+// nothing playing. Params::fix_silent_retrigger opts into the fix; the
+// default stays bit-exact with upstream (all other gold tests).
+#[test]
+fn test_16_1_param_change_while_silent_stays_silent() {
+    // Kick-style patch: instant attack, fast decay, NoteOn+NoteOff at the
+    // same pos (one-shot). R=1 → decay ≈ 234ms ≈ 10 blocks of 1024 @ 44.1k.
+    let mut p = Params::default();
+    p.pulse1_duty = 2;
+    p.pulse1_a = 0;
+    p.pulse1_r = 1;
+    p.pulse1_tune = 31;
+    p.pulse1_sweep = -1;
+    p.pulse1_shift = 2;
+    p.fix_silent_retrigger = true;
+
+    let mut proc = PapuProcessor::new(1);
+    proc.prepare(44_100.0);
+
+    let hit = vec![
+        ev(0, 1, MidiKind::NoteOn(36)),
+        ev(0, 1, MidiKind::NoteOff(36)),
+    ];
+
+    let mut lines = Vec::new();
+    let mut render = |proc: &mut PapuProcessor, p: &Params, label: &str, blocks: usize, events: Vec<MidiEvent>| {
+        let mut peak = 0.0f32;
+        for b in 0..blocks {
+            let evs = if b == 0 { events.clone() } else { vec![] };
+            let out = proc.process_block(1024, p, &evs);
+            peak = out[..1024].iter().fold(peak, |m, &s| m.max(s.abs()));
+        }
+        lines.push(format!("{label}: peak={peak:.4}"));
+    };
+
+    render(&mut proc, &p, "hit + decay (16 blocks)", 16, hit);
+    render(&mut proc, &p, "silence       (4 blocks)", 4, vec![]);
+    p.pulse1_tune = 12;
+    render(&mut proc, &p, "tune 31→12    (8 blocks)", 8, vec![]);
+    p.pulse1_fine = 50;
+    render(&mut proc, &p, "fine 0→50     (8 blocks)", 8, vec![]);
+
+    expect![[r#"
+        hit + decay (16 blocks): peak=0.2479
+        silence       (4 blocks): peak=0.0000
+        tune 31→12    (8 blocks): peak=0.0000
+        fine 0→50     (8 blocks): peak=0.0000"#]].assert_eq(&lines.join("\n"));
+}
