@@ -146,6 +146,16 @@ pub struct Params {
     // harness verifies); hosts set it to get the fix (gold tests 16.1,
     // 16.2).
     pub fix_silent_retrigger: bool,
+    // Opt-in bug fix (diverges from upstream PAPU when set): clamp the
+    // 11-bit frequency register value to 1..=2047 instead of letting the
+    // C++ uint16 conversion wrap. Upstream computes X = 2048 - 131072/freq
+    // (square; 2048 - 65536/freq for wave), so a note below the channel's
+    // floor (~64 Hz square, ~32 Hz wave) produces a negative X that wraps
+    // to a garbage HIGH pitch. With the clamp, sub-floor notes pin at the
+    // floor (X=1, not 0 — the APU hard-silences oscillators whose
+    // frequency register is 0). Default false = bit-exact upstream wrap
+    // (gold test 16.3).
+    pub fix_period_clamp: bool,
 }
 
 impl Default for Params {
@@ -170,6 +180,7 @@ impl Default for Params {
             wave_vib_rate:   5.0, wave_vib_amt:   0.0,
             wave_index: 0, treble: -20.0, bass: 461,
             fix_silent_retrigger: false,
+            fix_period_clamp: false,
         }
     }
 }
@@ -223,13 +234,17 @@ fn midi_hz(note: f64) -> f64 {
 /// Square/pulse frequency register period from freq (f32 arithmetic, matches C++).
 /// The `as i32 as u16` chain matches C++ `uint16_t(float)` which converts via
 /// int32 truncation then unsigned wrapping, rather than Rust's saturating `as u16`.
-fn sq_period(freq_f32: f32) -> u16 {
-    ((4_194_304.0_f32 / freq_f32 - 65_536.0_f32) / -32.0_f32) as i32 as u16
+/// With `clamp` (Params::fix_period_clamp) the value is pinned into the register's
+/// 11 bits instead, so sub-floor frequencies don't wrap to garbage high pitches.
+fn sq_period(freq_f32: f32, clamp: bool) -> u16 {
+    let x = ((4_194_304.0_f32 / freq_f32 - 65_536.0_f32) / -32.0_f32) as i32;
+    if clamp { x.clamp(1, 0x7ff) as u16 } else { x as u16 }
 }
 
 /// Wave channel frequency register period (f32 arithmetic, matches C++).
-fn wave_period(freq_f32: f32) -> u16 {
-    (-(65_536.0_f32 - 2048.0_f32 * freq_f32) / freq_f32) as i32 as u16
+fn wave_period(freq_f32: f32, clamp: bool) -> u16 {
+    let x = (-(65_536.0_f32 - 2048.0_f32 * freq_f32) / freq_f32) as i32;
+    if clamp { x.clamp(1, 0x7ff) as u16 } else { x as u16 }
 }
 
 impl PapuEngine {
@@ -301,7 +316,7 @@ impl PapuEngine {
             let note_f64  = cur_notes[0] as f64 + self.pitch_bend + p.pulse1_tune as f64 + fine_f32 as f64;
             let f1        = midi_hz(note_f64) as f32;
             self.freq[0]  = f1;
-            let period1   = sq_period(f1);
+            let period1   = sq_period(f1, p.fix_period_clamp);
             self.write_reg(0xff13, (period1 & 0xff) as u8, triggers[0]);
             let a1        = p.pulse1_a as u8;
             let env1: u8  = if a1 != 0 { 0x00 | (1 << 3) | a1 } else { 0xf0 };
@@ -313,7 +328,7 @@ impl PapuEngine {
             let r1 = p.pulse1_r as u8;
             let a1 = p.pulse1_a as u8;
             if a1 == 0 && r1 != 0 {
-                let period1 = sq_period(self.freq[0]);
+                let period1 = sq_period(self.freq[0], p.fix_period_clamp);
                 self.write_reg(0xff13, (period1 & 0xff) as u8, triggers[0]);
                 self.write_reg(0xff12, if r1 != 0 { 0xf0 | r1 } else { 0 }, triggers[0]);
                 self.write_reg(0xff14,
@@ -332,7 +347,7 @@ impl PapuEngine {
             let note_f64 = cur_notes[1] as f64 + self.pitch_bend + p.pulse2_tune as f64 + fine_f32 as f64;
             let f2       = midi_hz(note_f64) as f32;
             self.freq[1] = f2;
-            let period2  = sq_period(f2);
+            let period2  = sq_period(f2, p.fix_period_clamp);
             self.write_reg(0xff18, (period2 & 0xff) as u8, triggers[1]);
             let a2       = p.pulse2_a as u8;
             let env2: u8 = if a2 != 0 { 0x00 | (1 << 3) | a2 } else { 0xf0 };
@@ -344,7 +359,7 @@ impl PapuEngine {
             let r2 = p.pulse2_r as u8;
             let a2 = p.pulse2_a as u8;
             if a2 == 0 && r2 != 0 {
-                let period2 = sq_period(self.freq[1]);
+                let period2 = sq_period(self.freq[1], p.fix_period_clamp);
                 self.write_reg(0xff18, (period2 & 0xff) as u8, triggers[1]);
                 self.write_reg(0xff17, if r2 != 0 { 0xf0 | r2 } else { 0 }, triggers[1]);
                 self.write_reg(0xff19,
@@ -363,7 +378,7 @@ impl PapuEngine {
             let note_f64 = cur_notes[2] as f64 + self.pitch_bend + p.wave_tune as f64 + fine_f32 as f64;
             let f3       = midi_hz(note_f64) as f32;
             self.freq[2] = f3;
-            let period3  = wave_period(f3);
+            let period3  = wave_period(f3, p.fix_period_clamp);
             self.write_reg(0xff1D, (period3 & 0xff) as u8, triggers[2]);
             self.write_reg(0xff1C, 0x20, triggers[2]);
             self.write_reg(0xff1E,
@@ -410,7 +425,7 @@ impl PapuEngine {
                 + p.pulse1_tune as f64 + fine1 as f64
                 + self.lfos[0].get_output() * 12.0;
             let f1      = midi_hz(note1) as f32;
-            let period1 = sq_period(f1);
+            let period1 = sq_period(f1, p.fix_period_clamp);
             // Use entry().or_insert(0) to match C++ std::map::operator[] which inserts
             // default 0 when key is missing. This affects later writeReg skip logic.
             let trig1   = *self.reg_cache.entry(0xff14u32).or_insert(0) & 0x80 != 0
@@ -425,7 +440,7 @@ impl PapuEngine {
                 + p.pulse2_tune as f64 + fine2 as f64
                 + self.lfos[1].get_output() * 12.0;
             let f2      = midi_hz(note2) as f32;
-            let period2 = sq_period(f2);
+            let period2 = sq_period(f2, p.fix_period_clamp);
             let trig2   = *self.reg_cache.entry(0xff19u32).or_insert(0) & 0x80 != 0
                 && !(p.fix_silent_retrigger && self.last_notes[1] == -1);
             self.write_reg(0xff18, (period2 & 0xff) as u8, false);
@@ -439,7 +454,7 @@ impl PapuEngine {
                 + self.lfos[2].get_output() * 12.0;
             let f3      = midi_hz(note3) as f32;
             // C++ runVibrato uses sq_period here (bug in original), not wave_period.
-            let period3 = sq_period(f3);
+            let period3 = sq_period(f3, p.fix_period_clamp);
             let trig3   = *self.reg_cache.entry(0xff1eu32).or_insert(0) & 0x80 != 0
                 && !(p.fix_silent_retrigger && self.last_notes[2] == -1);
             self.write_reg(0xff1D, (period3 & 0xff) as u8, false);

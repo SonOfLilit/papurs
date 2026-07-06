@@ -1539,3 +1539,81 @@ fn test_16_2_vibrato_continues_through_release() {
         block 43 (tail):  559.9 Hz
         block 47 (tail):  602.9 Hz"#]].assert_eq(&lines.join("\n"));
 }
+
+// --- 16.3: fix_period_clamp — sub-floor notes pin at the floor, no wrap ---
+//
+// The square channel's frequency register is X = 2048 - 131072/freq, an
+// 11-bit value. Below 64 Hz X goes negative and the C++ uint16 conversion
+// wraps, so the masked 11 bits program a garbage HIGH pitch — a descending
+// scale jumps around wildly the moment it crosses the floor (heard in
+// bloop: a tom preset tuned -12 turned low keyboard pads into piercing
+// beeps). Params::fix_period_clamp clamps X to 1..=2047 (not 0: the APU
+// hard-silences a zero frequency register): notes below the floor pin
+// at ~64 Hz instead of wrapping. Default false = bit-exact
+// upstream wrap.
+#[test]
+fn test_16_3_sub_floor_notes_clamp_instead_of_wrapping() {
+    // Pitch estimate over blocks 4..8 (~93ms): sign transitions with
+    // 10%-of-peak hysteresis so band-limited ripple doesn't count, then
+    // crossings/2 per unit time. Returns (peak, Hz).
+    let render_note = |note: u8, clamp: bool| -> (f32, f64) {
+        let mut p = Params::default();
+        p.pulse1_duty = 2;
+        p.fix_period_clamp = clamp;
+        let mut proc = PapuProcessor::new(1);
+        proc.prepare(44_100.0);
+        let mut left = Vec::new();
+        for b in 0..8 {
+            let evs = if b == 0 { vec![ev(0, 1, MidiKind::NoteOn(note))] } else { vec![] };
+            let out = proc.process_block(1024, &p, &evs);
+            if b >= 4 {
+                left.extend(out.iter().step_by(2).copied());
+            }
+        }
+        let peak = left.iter().fold(0.0f32, |m, &s| m.max(s.abs()));
+        if peak < 0.005 {
+            return (peak, 0.0);
+        }
+        let thresh = peak * 0.1;
+        let mut crossings: Vec<usize> = Vec::new();
+        let mut sign = 0i32;
+        for (i, &smp) in left.iter().enumerate() {
+            let ns = if smp > thresh { 1 } else if smp < -thresh { -1 } else { 0 };
+            if ns != 0 {
+                if sign != 0 && ns != sign {
+                    crossings.push(i);
+                }
+                sign = ns;
+            }
+        }
+        if crossings.len() < 2 {
+            return (peak, 0.0);
+        }
+        let dt = (crossings[crossings.len() - 1] - crossings[0]) as f64 / 44_100.0;
+        (peak, (crossings.len() - 1) as f64 / (2.0 * dt))
+    };
+
+    // C2 (65.4 Hz) is just above the 64 Hz square-channel floor; B1 (61.7 Hz)
+    // and below are under it.
+    let lines: Vec<String> = [48u8, 43, 38, 36, 35, 33, 29, 24]
+        .iter()
+        .map(|&n| {
+            let (up_peak, up_hz) = render_note(n, false);
+            let (cl_peak, cl_hz) = render_note(n, true);
+            format!(
+                "note {n}: upstream peak={up_peak:.3} freq={up_hz:7.1} Hz | clamped peak={cl_peak:.3} freq={cl_hz:6.1} Hz",
+            )
+        })
+        .collect();
+
+    expect![[r#"
+        note 48: upstream peak=0.182 freq=  259.9 Hz | clamped peak=0.182 freq= 259.9 Hz
+        note 43: upstream peak=0.185 freq=  183.4 Hz | clamped peak=0.185 freq= 183.4 Hz
+        note 38: upstream peak=0.191 freq=  137.5 Hz | clamped peak=0.191 freq= 137.5 Hz
+        note 36: upstream peak=0.192 freq=  118.7 Hz | clamped peak=0.192 freq= 118.7 Hz
+        note 35: upstream peak=0.136 freq= 3514.0 Hz | clamped peak=0.182 freq= 105.3 Hz
+        note 33: upstream peak=0.192 freq=  778.9 Hz | clamped peak=0.182 freq= 105.3 Hz
+        note 29: upstream peak=0.199 freq=  266.3 Hz | clamped peak=0.182 freq= 105.3 Hz
+        note 24: upstream peak=0.182 freq=  107.4 Hz | clamped peak=0.182 freq= 105.3 Hz"#]].assert_eq(&lines.join("\n"));
+}
+
