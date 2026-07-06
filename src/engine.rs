@@ -135,14 +135,16 @@ pub struct Params {
     pub wave_index:       u8,   // 0-14, wave RAM preset
     pub treble:           f64,  // treble EQ in dB (e.g. -20.0)
     pub bass:             i32,  // bass high-pass frequency in Hz (e.g. 461)
-    // Opt-in bug fix (diverges from upstream PAPU when set): skip
-    // runVibrato's register writes for channels with no active note.
+    // Opt-in bug fix (diverges from upstream PAPU when set): mask the stale
+    // NRx4 trigger bit in runVibrato for channels with no active note.
     // Upstream reconstructs NRx4 from the register cache, ORing back the
     // trigger bit left by the last note write — so any period change while
     // a channel is silent (tune/fine/pitch bend/vibrato LFO) re-fires its
-    // release decay at full volume. Default false = bit-exact upstream
-    // behavior (what the C++ gold harness verifies); hosts set it to get
-    // the fix (gold test 16.1).
+    // release decay at full volume. The period writes themselves still
+    // happen, so vibrato keeps modulating a released note's decay tail.
+    // Default false = bit-exact upstream behavior (what the C++ gold
+    // harness verifies); hosts set it to get the fix (gold tests 16.1,
+    // 16.2).
     pub fix_silent_retrigger: bool,
 }
 
@@ -392,16 +394,17 @@ impl PapuEngine {
     }
 
     /// Advance LFO and update freq registers. Mirrors C++ PAPUEngine::runVibrato,
-    /// with one deliberate divergence: channels with no active note are skipped.
-    /// The C++ code reconstructs NRx4 from the register cache, ORing back the
-    /// trigger bit left there by the last note write — so any period change
-    /// while a channel is silent (tune/fine/bend/LFO) re-fires its release
-    /// decay. Frequency updates only make sense for a sounding, gated note;
-    /// while last_notes is -1 we leave the registers alone (gold test 16.1).
+    /// with one deliberate divergence: the C++ code reconstructs NRx4 from the
+    /// register cache, ORing back the trigger bit left there by the last note
+    /// write — so any period change while a channel is silent
+    /// (tune/fine/bend/LFO) re-fires its release decay. Under
+    /// fix_silent_retrigger we mask that stale trigger bit while last_notes is
+    /// -1 (gold test 16.1) but still write the modulated period, so vibrato
+    /// keeps swinging through the release tail (gold test 16.2).
     fn run_vibrato(&mut self, todo: i32, p: &Params) {
         for lfo in &mut self.lfos { lfo.process(todo); }
 
-        if !p.fix_silent_retrigger || self.last_notes[0] != -1 {
+        {
             let fine1 = p.pulse1_fine as f32 / 100.0_f32;
             let note1 = self.vib_notes[0] as f64 + self.pitch_bend
                 + p.pulse1_tune as f64 + fine1 as f64
@@ -410,24 +413,26 @@ impl PapuEngine {
             let period1 = sq_period(f1);
             // Use entry().or_insert(0) to match C++ std::map::operator[] which inserts
             // default 0 when key is missing. This affects later writeReg skip logic.
-            let trig1   = *self.reg_cache.entry(0xff14u32).or_insert(0) & 0x80 != 0;
+            let trig1   = *self.reg_cache.entry(0xff14u32).or_insert(0) & 0x80 != 0
+                && !(p.fix_silent_retrigger && self.last_notes[0] == -1);
             self.write_reg(0xff13, (period1 & 0xff) as u8, false);
             self.write_reg(0xff14, (if trig1 { 0x80u8 } else { 0 }) | ((period1 >> 8) as u8 & 0x07), false);
         }
 
-        if !p.fix_silent_retrigger || self.last_notes[1] != -1 {
+        {
             let fine2 = p.pulse2_fine as f32 / 100.0_f32;
             let note2 = self.vib_notes[1] as f64 + self.pitch_bend
                 + p.pulse2_tune as f64 + fine2 as f64
                 + self.lfos[1].get_output() * 12.0;
             let f2      = midi_hz(note2) as f32;
             let period2 = sq_period(f2);
-            let trig2   = *self.reg_cache.entry(0xff19u32).or_insert(0) & 0x80 != 0;
+            let trig2   = *self.reg_cache.entry(0xff19u32).or_insert(0) & 0x80 != 0
+                && !(p.fix_silent_retrigger && self.last_notes[1] == -1);
             self.write_reg(0xff18, (period2 & 0xff) as u8, false);
             self.write_reg(0xff19, (if trig2 { 0x80u8 } else { 0 }) | ((period2 >> 8) as u8 & 0x07), false);
         }
 
-        if !p.fix_silent_retrigger || self.last_notes[2] != -1 {
+        {
             let fine3 = p.wave_fine as f32 / 100.0_f32;
             let note3 = self.vib_notes[2] as f64 + self.pitch_bend
                 + p.wave_tune as f64 + fine3 as f64
@@ -435,7 +440,8 @@ impl PapuEngine {
             let f3      = midi_hz(note3) as f32;
             // C++ runVibrato uses sq_period here (bug in original), not wave_period.
             let period3 = sq_period(f3);
-            let trig3   = *self.reg_cache.entry(0xff1eu32).or_insert(0) & 0x80 != 0;
+            let trig3   = *self.reg_cache.entry(0xff1eu32).or_insert(0) & 0x80 != 0
+                && !(p.fix_silent_retrigger && self.last_notes[2] == -1);
             self.write_reg(0xff1D, (period3 & 0xff) as u8, false);
             self.write_reg(0xff1E, (if trig3 { 0x80u8 } else { 0 }) | ((period3 >> 8) as u8 & 0x07), false);
         }

@@ -1471,8 +1471,71 @@ fn test_16_1_param_change_while_silent_stays_silent() {
     render(&mut proc, &p, "fine 0→50     (8 blocks)", 8, vec![]);
 
     expect![[r#"
-        hit + decay (16 blocks): peak=0.2479
+        hit + decay (16 blocks): peak=0.2438
         silence       (4 blocks): peak=0.0000
         tune 31→12    (8 blocks): peak=0.0000
         fine 0→50     (8 blocks): peak=0.0000"#]].assert_eq(&lines.join("\n"));
+}
+
+// --- 16.2: fix_silent_retrigger — vibrato continues through the release tail ---
+//
+// The first version of fix_silent_retrigger skipped runVibrato's register
+// writes entirely while lastNote == -1. NoteOff sets lastNote to -1, so a
+// released note's decay tail froze at whatever pitch the LFO last wrote —
+// audible as vibrato that stops dead on NoteOff and parks on an arbitrary
+// pitch. The fix must keep writing the modulated period during the tail and
+// only mask the stale trigger bit. Estimate pitch per block via positive
+// zero crossings: vibrato must keep swinging after NoteOff.
+#[test]
+fn test_16_2_vibrato_continues_through_release() {
+    let mut p = Params::default();
+    p.pulse1_duty = 2;
+    p.pulse1_a = 0;
+    p.pulse1_r = 7; // longest release: tail lasts seconds
+    p.pulse1_vib_rate = 4.0;
+    p.pulse1_vib_amt = 100.0; // depth 0.25 → ±3 semitones
+    p.fix_silent_retrigger = true;
+
+    let mut proc = PapuProcessor::new(1);
+    proc.prepare(44_100.0);
+
+    // Positive-going zero crossings on the left channel → Hz estimate.
+    let block_hz = |out: &[f32]| -> f64 {
+        let left: Vec<f32> = out.iter().step_by(2).copied().collect();
+        let crossings = left
+            .windows(2)
+            .filter(|w| w[0] <= 0.0 && w[1] > 0.0)
+            .count();
+        crossings as f64 * 44_100.0 / left.len() as f64
+    };
+
+    let mut lines = Vec::new();
+    // NoteOn C4, hold 24 blocks (~557ms ≈ 2.2 vibrato cycles), NoteOff,
+    // then 24 more blocks of release tail.
+    for b in 0..48 {
+        let events = match b {
+            0 => vec![ev(0, 1, MidiKind::NoteOn(60))],
+            24 => vec![ev(0, 1, MidiKind::NoteOff(60))],
+            _ => vec![],
+        };
+        let out = proc.process_block(1024, &p, &events);
+        if b % 4 == 3 {
+            let phase = if b < 24 { "held" } else { "tail" };
+            lines.push(format!("block {b:2} ({phase}): {:6.1} Hz", block_hz(&out)));
+        }
+    }
+
+    expect![[r#"
+        block  3 (held):  602.9 Hz
+        block  7 (held):  430.7 Hz
+        block 11 (held):  602.9 Hz
+        block 15 (held):  559.9 Hz
+        block 19 (held):  430.7 Hz
+        block 23 (held):  602.9 Hz
+        block 27 (tail):  516.8 Hz
+        block 31 (tail):  516.8 Hz
+        block 35 (tail):  602.9 Hz
+        block 39 (tail):  430.7 Hz
+        block 43 (tail):  559.9 Hz
+        block 47 (tail):  602.9 Hz"#]].assert_eq(&lines.join("\n"));
 }
