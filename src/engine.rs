@@ -156,6 +156,14 @@ pub struct Params {
     // frequency register is 0). Default false = bit-exact upstream wrap
     // (gold test 16.3).
     pub fix_period_clamp: bool,
+    // Opt-in bug fix (diverges from upstream PAPU when set): runVibrato
+    // rewrites the wave channel's frequency registers with the SQUARE
+    // channel's period formula (upstream C++ bug), retuning it to exactly
+    // half the requested frequency — the wave channel always sounds an
+    // octave below the pulse channels playing the same MIDI note. With the
+    // fix, runVibrato uses the wave formula, matching runOscs' correct
+    // initial tuning. Default false = bit-exact upstream (gold test 16.4).
+    pub fix_wave_vibrato_period: bool,
 }
 
 impl Default for Params {
@@ -181,6 +189,7 @@ impl Default for Params {
             wave_index: 0, treble: -20.0, bass: 461,
             fix_silent_retrigger: false,
             fix_period_clamp: false,
+            fix_wave_vibrato_period: false,
         }
     }
 }
@@ -453,8 +462,14 @@ impl PapuEngine {
                 + p.wave_tune as f64 + fine3 as f64
                 + self.lfos[2].get_output() * 12.0;
             let f3      = midi_hz(note3) as f32;
-            // C++ runVibrato uses sq_period here (bug in original), not wave_period.
-            let period3 = sq_period(f3, p.fix_period_clamp);
+            // C++ runVibrato uses sq_period here (bug in original, retunes
+            // the wave channel an octave down); fix_wave_vibrato_period
+            // opts into the correct wave formula.
+            let period3 = if p.fix_wave_vibrato_period {
+                wave_period(f3, p.fix_period_clamp)
+            } else {
+                sq_period(f3, p.fix_period_clamp)
+            };
             let trig3   = *self.reg_cache.entry(0xff1eu32).or_insert(0) & 0x80 != 0
                 && !(p.fix_silent_retrigger && self.last_notes[2] == -1);
             self.write_reg(0xff1D, (period3 & 0xff) as u8, false);

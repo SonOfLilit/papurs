@@ -1617,3 +1617,83 @@ fn test_16_3_sub_floor_notes_clamp_instead_of_wrapping() {
         note 24: upstream peak=0.182 freq=  107.4 Hz | clamped peak=0.182 freq= 105.3 Hz"#]].assert_eq(&lines.join("\n"));
 }
 
+
+// --- 16.4: fix_wave_vibrato_period — wave channel plays at its MIDI pitch ---
+//
+// runVibrato rewrites every channel's frequency registers every block, and
+// uses the square-channel formula (X = 2048 - 131072/freq) for the wave
+// channel too — upstream C++ bug (PluginProcessor.cpp runVibrato). The wave
+// register maps to freq = 65536/(2048-X), so the rewrite retunes the
+// channel to exactly half the requested frequency: the wave channel always
+// sounds an octave below the pulse channels playing the same MIDI note
+// (and, being an octave lower, loses loudness to the 461 Hz bass high-pass).
+// run_oscs writes the correct period on the trigger, but the very first
+// runVibrato call overwrites it. With fix_wave_vibrato_period, runVibrato
+// uses the wave formula. Default false = bit-exact upstream behavior.
+#[test]
+fn test_16_4_wave_channel_plays_at_midi_pitch() {
+    // Peak + pitch estimate over blocks 4..8, same estimator as 16.3.
+    let render_note = |note: u8, wave: bool, fixed: bool| -> (f32, f64) {
+        let mut p = Params::default();
+        if wave {
+            p.pulse1_ol = false;
+            p.pulse1_or = false;
+            p.wave_ol = true;
+            p.wave_or = true;
+            p.wave_index = 14; // full-scale square wave shape
+        } else {
+            p.pulse1_duty = 2; // 50% duty square, matching wave shape 14
+            p.pulse1_a = 0; // instant full volume (wave has no envelope)
+        }
+        p.fix_wave_vibrato_period = fixed;
+        let mut proc = PapuProcessor::new(1);
+        proc.prepare(44_100.0);
+        let mut left = Vec::new();
+        for b in 0..8 {
+            let evs = if b == 0 { vec![ev(0, 1, MidiKind::NoteOn(note))] } else { vec![] };
+            let out = proc.process_block(1024, &p, &evs);
+            if b >= 4 {
+                left.extend(out.iter().step_by(2).copied());
+            }
+        }
+        let peak = left.iter().fold(0.0f32, |m, &s| m.max(s.abs()));
+        if peak < 0.005 {
+            return (peak, 0.0);
+        }
+        let thresh = peak * 0.1;
+        let mut crossings: Vec<usize> = Vec::new();
+        let mut sign = 0i32;
+        for (i, &smp) in left.iter().enumerate() {
+            let ns = if smp > thresh { 1 } else if smp < -thresh { -1 } else { 0 };
+            if ns != 0 {
+                if sign != 0 && ns != sign {
+                    crossings.push(i);
+                }
+                sign = ns;
+            }
+        }
+        if crossings.len() < 2 {
+            return (peak, 0.0);
+        }
+        let dt = (crossings[crossings.len() - 1] - crossings[0]) as f64 / 44_100.0;
+        (peak, (crossings.len() - 1) as f64 / (2.0 * dt))
+    };
+
+    let lines: Vec<String> = [48u8, 60, 72, 84]
+        .iter()
+        .map(|&n| {
+            let (_, pulse_hz) = render_note(n, false, false);
+            let (up_peak, up_hz) = render_note(n, true, false);
+            let (fx_peak, fx_hz) = render_note(n, true, true);
+            format!(
+                "note {n}: pulse freq={pulse_hz:6.1} Hz | wave upstream peak={up_peak:.3} freq={up_hz:6.1} Hz | wave fixed peak={fx_peak:.3} freq={fx_hz:6.1} Hz",
+            )
+        })
+        .collect();
+
+    expect![[r#"
+        note 48: pulse freq= 260.0 Hz | wave upstream peak=0.244 freq= 106.3 Hz | wave fixed peak=0.244 freq= 259.9 Hz
+        note 60: pulse freq= 520.0 Hz | wave upstream peak=0.244 freq= 259.9 Hz | wave fixed peak=0.244 freq= 519.5 Hz
+        note 72: pulse freq=1038.9 Hz | wave upstream peak=0.243 freq= 519.4 Hz | wave fixed peak=0.229 freq=1036.8 Hz
+        note 84: pulse freq=2084.6 Hz | wave upstream peak=0.229 freq=1047.9 Hz | wave fixed peak=0.194 freq=2074.3 Hz"#]].assert_eq(&lines.join("\n"));
+}
