@@ -20,5 +20,7 @@
 pub mod blip;
 pub mod apu;
 pub mod engine;
+#[cfg(feature = "capi")]
+pub mod ffi;
 #[cfg(feature = "vst-plugin")]
 pub mod plugin;
