@@ -617,6 +617,30 @@ mod tests {
         }
     }
 
+    /// Out-of-range param indices and unknown MIDI kinds are ignored:
+    /// a render preceded by both is bit-identical to one with neither.
+    #[test]
+    fn out_of_range_param_and_unknown_midi_are_ignored() {
+        let baseline = render_via_ffi(4, &[], &[(0, midi::NOTE_ON, 60)], 32);
+        let handle = papurs_new(4, 48000.0);
+        let mut left = Vec::new();
+        unsafe {
+            papurs_set_param(handle, param::COUNT, 3.0);
+            papurs_set_param(handle, 9999, 1.0);
+            for block in 0..32 {
+                if block == 0 {
+                    papurs_push_midi(handle, 0, 1, 99, 60);
+                    papurs_push_midi(handle, 0, 1, midi::NOTE_ON, 60);
+                }
+                let ptr = papurs_render(handle, BLOCK);
+                let out = core::slice::from_raw_parts(ptr, 2 * BLOCK as usize);
+                left.extend_from_slice(&out[..BLOCK as usize]);
+            }
+            papurs_free(handle);
+        }
+        assert_eq!(left, baseline);
+    }
+
     /// MIDI staging overflow: the event at capacity is dropped, not
     /// reallocated — the queue length stays pinned at MIDI_CAPACITY.
     #[test]
