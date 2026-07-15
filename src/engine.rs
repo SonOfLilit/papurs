@@ -282,7 +282,9 @@ impl PapuEngine {
         self.apu.treble_eq(&eq);
         self.sbuf.bass_freq(461);
         self.sbuf.clock_rate(CLOCK_RATE);
-        self.sbuf.set_sample_rate(sample_rate as i64);
+        // Bounded buffer (vs. the ~128KB-per-buffer default): 300ms
+        // covers the largest host block (8192 samples) down to ~32kHz.
+        self.sbuf.set_sample_rate_msec(sample_rate as i64, 300);
         for lfo in &mut self.lfos { lfo.set_sample_rate(sample_rate); }
 
         // Load wave preset 0

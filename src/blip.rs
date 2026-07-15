@@ -743,6 +743,15 @@ impl StereoBuffer {
         for b in &mut self.bufs { b.set_sample_rate(rate, None); }
     }
 
+    /// Like [`Self::set_sample_rate`], but with a bounded buffer length.
+    /// The `None` default sizes each of the three BlipBuffers to the
+    /// fixed-point maximum (~128KB): fine for one instance, prohibitive
+    /// for hosts that run many engines. Capacity only — rendered samples
+    /// are identical as long as the buffer covers one host block.
+    pub fn set_sample_rate_msec(&mut self, rate: i64, msec: i64) {
+        for b in &mut self.bufs { b.set_sample_rate(rate, Some(msec)); }
+    }
+
     pub fn clock_rate(&mut self, rate: i64) {
         for b in &mut self.bufs { b.clock_rate(rate); }
     }
